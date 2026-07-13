@@ -1,0 +1,27 @@
+# Secrets — never commit anything under this directory
+secrets/
+
+# Environment files anywhere in the tree
+.env
+.env.*
+*.env
+
+# Key material
+*.pem
+*.key
+*_rsa
+*_ed25519
+
+# OS noise
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+build/
