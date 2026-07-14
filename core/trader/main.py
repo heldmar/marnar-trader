@@ -1,7 +1,8 @@
-"""Core service entrypoint — FastAPI app exposing health and status.
+"""Core service entrypoint — FastAPI app exposing health, risk status, kill switch.
 
-Sprint 1 keeps the service minimal: it opens the journal, verifies exchange
-connectivity, and reports health. Trading loops arrive in later sprints.
+Startup order is a crash-safety rule (docs/ARCHITECTURE.md §5.4): open the
+journal, then reconcile against the exchange, and only if reconciliation is
+clean does trading unlock. The kill switch is available regardless.
 """
 
 from __future__ import annotations
@@ -10,12 +11,16 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
 from trader import __version__
 from trader.config import Secrets, load_config
+from trader.execution import OrderManager
 from trader.gateway import BinanceGateway
 from trader.journal import Journal
+from trader.reconciler import Reconciler
+from trader.risk import RiskManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("trader")
@@ -29,14 +34,31 @@ async def lifespan(app: FastAPI):
     app.state.config = config
     app.state.journal = Journal(config.db_path)
     app.state.gateway = None
+    app.state.orders = None
+    app.state.reconciliation = None
+    app.state.trading_enabled = False
+    app.state.risk = RiskManager(app.state.journal, config.risk, config.timezone)
+
     secrets = Secrets.from_env(config.mode)
     if secrets.binance_api_key:
         app.state.gateway = BinanceGateway(
             secrets.binance_api_key, secrets.binance_api_secret, testnet=True
         )
+        app.state.orders = OrderManager(app.state.journal, app.state.gateway, app.state.risk)
+        # Reconcile FIRST, trade second — trading stays locked on a dirty report.
+        try:
+            report = Reconciler(app.state.journal, app.state.gateway).run()
+            app.state.reconciliation = report.summary()
+            app.state.trading_enabled = report.clean
+        except Exception as exc:
+            log.error("reconciliation failed hard: %s", exc)
+            app.state.reconciliation = {"clean": False, "errors": [str(exc)]}
     else:
         log.warning("no Binance credentials in environment — exchange connectivity disabled")
-    log.info("core started: mode=%s db=%s", config.mode, config.db_path)
+    log.info(
+        "core started: mode=%s db=%s trading_enabled=%s risk=%s",
+        config.mode, config.db_path, app.state.trading_enabled, app.state.risk.state.value,
+    )
     yield
     app.state.journal.close()
 
@@ -59,5 +81,35 @@ async def health() -> dict:
         "version": __version__,
         "mode": app.state.config.mode,
         "exchange": exchange,
+        "trading_enabled": app.state.trading_enabled,
+        "risk": app.state.risk.status(),
+        "reconciliation": app.state.reconciliation,
         "open_orders_journaled": len(app.state.journal.open_orders()),
+        "positions": [dict(p) for p in app.state.journal.positions()],
     }
+
+
+class KillSwitchRequest(BaseModel):
+    close_positions: bool = False
+    reason: str = "kill switch"
+
+
+@app.post("/api/kill-switch")
+async def kill_switch(req: KillSwitchRequest) -> dict:
+    """Manual halt (D-21): always stops trading and cancels pending orders;
+    optionally force-flats all positions."""
+    action = app.state.risk.halt_manual(req.reason, close_positions=req.close_positions)
+    app.state.trading_enabled = False
+    if app.state.orders is not None:
+        return app.state.orders.apply_halt(action)
+    return {"state": action.state.value, "cancelled": 0, "closed_positions": []}
+
+
+@app.post("/api/resume")
+async def resume() -> dict:
+    """Manual reactivation (required after drawdown/manual halts, D-07)."""
+    if app.state.reconciliation is not None and not app.state.reconciliation.get("clean"):
+        raise HTTPException(409, "cannot resume: last reconciliation was not clean")
+    app.state.risk.resume()
+    app.state.trading_enabled = app.state.gateway is not None
+    return {"state": app.state.risk.state.value, "trading_enabled": app.state.trading_enabled}

@@ -1,4 +1,6 @@
-from trader.journal import Journal, client_order_id_for, make_intent_id
+from decimal import Decimal
+
+from trader.journal import SCHEMA_VERSION, Journal, client_order_id_for, make_intent_id
 
 
 def make_journal(tmp_path):
@@ -84,3 +86,120 @@ def test_journal_survives_reopen(tmp_path):
     assert j2.get_order(coid)["status"] == "SUBMITTING"
     assert len(j2.open_orders()) == 1  # reconciler's input after a power cut
     j2.close()
+
+
+# -- v2 (Sprint 2): migration, positions, P&L, app state -----------------------------
+
+
+def filled_buy(j, symbol="BTCUSDT", qty="0.002", price="50000", nonce="v2-1", trade="t-1"):
+    intent = j.record_intent(symbol=symbol, side="BUY", order_type="LIMIT",
+                             quantity=qty, price=price, source="test", nonce=nonce)
+    coid = j.record_order_submitting(intent)
+    j.record_order_ack(coid, "1", "FILLED")
+    j.record_fill(client_order_id=coid, fill_id=trade, quantity=qty, price=price,
+                  fee="0", fee_asset="USDT", executed_at="2026-07-13T00:00:00Z")
+    j.record_order_status(coid, "FILLED")
+    return coid
+
+
+def test_v1_db_migrates_to_current_version(tmp_path):
+    j = make_journal(tmp_path)
+    j.close()
+    import sqlite3
+
+    conn = sqlite3.connect(tmp_path / "journal.db")
+    with conn:
+        conn.execute("UPDATE schema_version SET version=1")
+        conn.executescript(
+            "DROP TABLE positions; DROP TABLE pnl_ledger; DROP TABLE app_state;"
+        )
+    conn.close()
+
+    j2 = make_journal(tmp_path)  # v1 DB (like the Pi's) must open and migrate
+    assert j2._conn.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
+    j2.set_state("probe", {"ok": True})  # new tables exist and work
+    assert j2.get_state("probe") == {"ok": True}
+    j2.close()
+
+
+def test_buy_fill_opens_position_and_sell_realizes_pnl(tmp_path):
+    j = make_journal(tmp_path)
+    filled_buy(j, qty="0.002", price="50000")  # cost 100
+    pos = j.position_for("BTCUSDT")
+    assert Decimal(pos["quantity"]) == Decimal("0.002")
+    assert Decimal(pos["cost"]) == Decimal("100")
+
+    intent = j.record_intent(symbol="BTCUSDT", side="SELL", order_type="LIMIT",
+                             quantity="0.001", price="60000", source="test", nonce="v2-2")
+    coid = j.record_order_submitting(intent)
+    j.record_order_ack(coid, "2", "FILLED")
+    j.record_fill(client_order_id=coid, fill_id="t-2", quantity="0.001", price="60000",
+                  fee="0.06", fee_asset="USDT", executed_at="2026-07-13T01:00:00Z")
+
+    pos = j.position_for("BTCUSDT")
+    assert Decimal(pos["quantity"]) == Decimal("0.001")  # half sold
+    # realized: (60000-50000)*0.001 - 0.06 fee = 9.94
+    assert j.realized_pnl_since("2026-01-01") == Decimal("9.94")
+    j.close()
+
+
+def test_full_sell_closes_position(tmp_path):
+    j = make_journal(tmp_path)
+    filled_buy(j, qty="0.001", price="50000")
+    intent = j.record_intent(symbol="BTCUSDT", side="SELL", order_type="MARKET",
+                             quantity="0.001", price=None, source="test", nonce="v2-3")
+    coid = j.record_order_submitting(intent)
+    j.record_order_ack(coid, "3", "FILLED")
+    j.record_fill(client_order_id=coid, fill_id="t-3", quantity="0.001", price="49000",
+                  fee="0", fee_asset="USDT", executed_at="2026-07-13T02:00:00Z")
+    assert j.position_for("BTCUSDT") is None
+    assert j.realized_pnl_since("2026-01-01") == Decimal("-1.000")  # loss journaled too
+    j.close()
+
+
+def test_duplicate_fill_does_not_double_apply(tmp_path):
+    j = make_journal(tmp_path)
+    coid = filled_buy(j, qty="0.002", price="50000")
+    # reconciler re-syncs the same trade id after a crash
+    j.record_fill(client_order_id=coid, fill_id="t-1", quantity="0.002", price="50000",
+                  fee="0", fee_asset="USDT", executed_at="2026-07-13T00:00:00Z")
+    assert Decimal(j.position_for("BTCUSDT")["quantity"]) == Decimal("0.002")
+    assert j._conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 1
+    j.close()
+
+
+def test_sell_without_position_is_flagged_not_crashing(tmp_path):
+    j = make_journal(tmp_path)
+    intent = j.record_intent(symbol="ETHUSDT", side="SELL", order_type="LIMIT",
+                             quantity="1", price="3000", source="test", nonce="v2-4")
+    coid = j.record_order_submitting(intent)
+    j.record_order_ack(coid, "4", "FILLED")
+    j.record_fill(client_order_id=coid, fill_id="t-9", quantity="1", price="3000",
+                  fee="0", fee_asset="USDT", executed_at="2026-07-13T03:00:00Z")
+    flagged = j._conn.execute(
+        "SELECT COUNT(*) FROM events WHERE kind='FILL_WITHOUT_POSITION'"
+    ).fetchone()[0]
+    assert flagged == 1
+    j.close()
+
+
+def test_app_state_roundtrip_and_overwrite(tmp_path):
+    j = make_journal(tmp_path)
+    assert j.get_state("missing") is None
+    assert j.get_state("missing", "fallback") == "fallback"
+    j.set_state("k", {"a": 1})
+    j.set_state("k", {"a": 2})
+    assert j.get_state("k") == {"a": 2}
+    j.close()
+    j2 = make_journal(tmp_path)
+    assert j2.get_state("k") == {"a": 2}  # survives restart
+    j2.close()
+
+
+def test_orders_created_since_counts_for_rate_cap(tmp_path):
+    j = make_journal(tmp_path)
+    filled_buy(j, nonce="r1", trade="t-r1")
+    filled_buy(j, nonce="r2", trade="t-r2")
+    assert j.orders_created_since("2000-01-01") == 2
+    assert j.orders_created_since("2999-01-01") == 0
+    j.close()

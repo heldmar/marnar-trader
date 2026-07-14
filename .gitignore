@@ -25,3 +25,7 @@ venv/
 node_modules/
 dist/
 build/
+
+# Coverage / test artifacts
+.coverage
+*.egg-info/

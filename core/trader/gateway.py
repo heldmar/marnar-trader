@@ -69,8 +69,13 @@ class ExchangeGateway(Protocol):
     def place_limit_order(
         self, *, symbol: str, side: str, quantity: str, price: str, client_order_id: str
     ) -> dict[str, Any]: ...
+    def place_market_order(
+        self, *, symbol: str, side: str, quantity: str, client_order_id: str
+    ) -> dict[str, Any]: ...
     def cancel_order(self, *, symbol: str, client_order_id: str) -> dict[str, Any]: ...
     def open_orders(self, symbol: str | None = None) -> list[dict[str, Any]]: ...
+    def get_order(self, *, symbol: str, client_order_id: str) -> dict[str, Any] | None: ...
+    def my_trades(self, *, symbol: str, order_id: int) -> list[dict[str, Any]]: ...
 
 
 class BinanceGateway:
@@ -116,11 +121,37 @@ class BinanceGateway:
             newClientOrderId=client_order_id,
         )
 
+    def place_market_order(
+        self, *, symbol: str, side: str, quantity: str, client_order_id: str
+    ) -> dict[str, Any]:
+        return self._client.new_order(
+            symbol=symbol,
+            side=side,
+            type="MARKET",
+            quantity=quantity,
+            newClientOrderId=client_order_id,
+        )
+
     def cancel_order(self, *, symbol: str, client_order_id: str) -> dict[str, Any]:
         return self._client.cancel_order(symbol=symbol, origClientOrderId=client_order_id)
 
     def open_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
         return self._client.get_open_orders(symbol=symbol)
+
+    def get_order(self, *, symbol: str, client_order_id: str) -> dict[str, Any] | None:
+        """Order lookup by our idempotent client order id; None if the exchange
+        never saw it (the reconciler's it-never-left-the-building case)."""
+        from binance.error import ClientError
+
+        try:
+            return self._client.get_order(symbol=symbol, origClientOrderId=client_order_id)
+        except ClientError as exc:
+            if exc.error_code == -2013:  # "Order does not exist."
+                return None
+            raise
+
+    def my_trades(self, *, symbol: str, order_id: int) -> list[dict[str, Any]]:
+        return self._client.my_trades(symbol=symbol, orderId=order_id)
 
     # -- WebSocket --------------------------------------------------------------
 

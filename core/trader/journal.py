@@ -19,10 +19,11 @@ import json
 import sqlite3
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -79,7 +80,39 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_orders_intent ON orders(intent_id);
 CREATE INDEX IF NOT EXISTS idx_events_ref ON events(ref_id);
+
+-- v2 (Sprint 2) --------------------------------------------------------------
+
+-- Open spot positions, maintained from fills (BUY adds, SELL reduces).
+CREATE TABLE IF NOT EXISTS positions (
+    symbol      TEXT PRIMARY KEY,
+    quantity    TEXT NOT NULL,                 -- decimal string, base asset
+    cost        TEXT NOT NULL,                 -- quote spent on the open quantity
+    updated_at  TEXT NOT NULL
+);
+
+-- Realized P&L ledger: one row per position-reducing fill (SELL on spot).
+CREATE TABLE IF NOT EXISTS pnl_ledger (
+    entry_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT NOT NULL,
+    symbol       TEXT NOT NULL,
+    realized_pnl TEXT NOT NULL,                -- decimal string, quote asset
+    fee          TEXT NOT NULL DEFAULT '0'
+);
+
+-- Durable key/value state: halt state, equity peak, daily anchor.
+-- Circuit-breaker halts MUST survive a crash/restart (D-07: drawdown halt
+-- requires manual reactivation), so they live here, never only in memory.
+CREATE TABLE IF NOT EXISTS app_state (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,                  -- JSON
+    updated_at TEXT NOT NULL
+);
 """
+
+# Tables added by each version bump; applying the base _SCHEMA (all CREATE IF
+# NOT EXISTS) migrates any older DB forward, so migrations stay additive-only.
+_ADDITIVE_VERSIONS = {1, 2}
 
 
 def utcnow() -> str:
@@ -126,6 +159,12 @@ class Journal:
                 self._conn.execute(
                     "INSERT INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,)
                 )
+            elif row["version"] < SCHEMA_VERSION and row["version"] in _ADDITIVE_VERSIONS:
+                # Additive-only migration: the executescript above already created
+                # the missing tables; just stamp the new version.
+                self._conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
+                self._event("SCHEMA_MIGRATED", "journal",
+                            {"from": row["version"], "to": SCHEMA_VERSION})
             elif row["version"] != SCHEMA_VERSION:
                 raise RuntimeError(
                     f"journal schema version {row['version']} != code {SCHEMA_VERSION}; "
@@ -142,6 +181,11 @@ class Journal:
             "INSERT INTO events(ts, kind, ref_id, payload) VALUES (?,?,?,?)",
             (utcnow(), kind, ref_id, json.dumps(payload or {}, default=str)),
         )
+
+    def record_event(self, kind: str, ref_id: str, payload: dict[str, Any] | None = None) -> None:
+        """Standalone committed audit event (risk rejections, halt execution, ...)."""
+        with self._conn:
+            self._event(kind, ref_id, payload)
 
     # -- intent lifecycle ----------------------------------------------------
 
@@ -229,14 +273,87 @@ class Journal:
         fee_asset: str | None,
         executed_at: str,
     ) -> None:
+        """Record a fill and, in the same transaction, update the position and
+        (on SELL) the realized-P&L ledger. Idempotent: a fill_id seen before is
+        ignored and does NOT re-apply to the position."""
         with self._conn:
-            self._conn.execute(
+            cur = self._conn.execute(
                 "INSERT OR IGNORE INTO fills"
                 "(fill_id, client_order_id, quantity, price, fee, fee_asset, executed_at)"
                 " VALUES (?,?,?,?,?,?,?)",
                 (fill_id, client_order_id, quantity, price, fee, fee_asset, executed_at),
             )
+            if cur.rowcount == 0:
+                return  # duplicate fill (crash-retry / reconciler resync)
             self._event("FILL", client_order_id, {"fill_id": fill_id, "qty": quantity})
+            order = self._conn.execute(
+                "SELECT symbol, side FROM orders WHERE client_order_id=?", (client_order_id,)
+            ).fetchone()
+            if order is not None:
+                self._apply_fill_to_position(
+                    symbol=order["symbol"], side=order["side"],
+                    quantity=Decimal(quantity), price=Decimal(price), fee=Decimal(fee),
+                )
+
+    def _apply_fill_to_position(
+        self, *, symbol: str, side: str, quantity: Decimal, price: Decimal, fee: Decimal
+    ) -> None:
+        """Position bookkeeping (spot): BUY adds quantity at cost; SELL reduces it
+        and realizes P&L against the average entry cost. Runs inside record_fill's
+        transaction — never call it standalone."""
+        now = utcnow()
+        row = self._conn.execute(
+            "SELECT quantity, cost FROM positions WHERE symbol=?", (symbol,)
+        ).fetchone()
+        if side == "BUY":
+            if row is None:
+                qty, cost = quantity, quantity * price
+            else:
+                qty = Decimal(row["quantity"]) + quantity
+                cost = Decimal(row["cost"]) + quantity * price
+            self._conn.execute(
+                "INSERT INTO positions(symbol, quantity, cost, updated_at) VALUES (?,?,?,?)"
+                " ON CONFLICT(symbol) DO UPDATE SET quantity=?, cost=?, updated_at=?",
+                (symbol, str(qty), str(cost), now, str(qty), str(cost), now),
+            )
+            return
+        # SELL
+        if row is None:
+            # Selling with no journaled position (e.g. pre-existing balance adopted
+            # mid-flight). Nothing to realize against — flag it for the reconciler.
+            self._event("FILL_WITHOUT_POSITION", symbol, {"side": side, "qty": str(quantity)})
+            return
+        held_qty, held_cost = Decimal(row["quantity"]), Decimal(row["cost"])
+        sell_qty = min(quantity, held_qty)
+        avg_cost = held_cost / held_qty
+        realized = (price - avg_cost) * sell_qty - fee
+        self._conn.execute(
+            "INSERT INTO pnl_ledger(ts, symbol, realized_pnl, fee) VALUES (?,?,?,?)",
+            (now, symbol, str(realized), str(fee)),
+        )
+        remaining = held_qty - sell_qty
+        if remaining > 0:
+            self._conn.execute(
+                "UPDATE positions SET quantity=?, cost=?, updated_at=? WHERE symbol=?",
+                (str(remaining), str(avg_cost * remaining), now, symbol),
+            )
+        else:
+            self._conn.execute("DELETE FROM positions WHERE symbol=?", (symbol,))
+
+    # -- durable app state (halt state, equity peak, day anchor) ---------------
+
+    def get_state(self, key: str, default: Any = None) -> Any:
+        row = self._conn.execute("SELECT value FROM app_state WHERE key=?", (key,)).fetchone()
+        return default if row is None else json.loads(row["value"])
+
+    def set_state(self, key: str, value: Any) -> None:
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO app_state(key, value, updated_at) VALUES (?,?,?)"
+                " ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+                " updated_at=excluded.updated_at",
+                (key, json.dumps(value, default=str), utcnow()),
+            )
 
     # -- reads ----------------------------------------------------------------
 
@@ -252,5 +369,26 @@ class Journal:
 
     def open_orders(self) -> list[sqlite3.Row]:
         return self._conn.execute(
-            "SELECT * FROM orders WHERE status IN ('SUBMITTING','SUBMITTED','PARTIALLY_FILLED')"
+            "SELECT * FROM orders WHERE status IN "
+            "('SUBMITTING','SUBMITTED','NEW','PARTIALLY_FILLED')"
         ).fetchall()
+
+    def positions(self) -> list[sqlite3.Row]:
+        return self._conn.execute("SELECT * FROM positions ORDER BY symbol").fetchall()
+
+    def position_for(self, symbol: str) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT * FROM positions WHERE symbol=?", (symbol,)
+        ).fetchone()
+
+    def realized_pnl_since(self, ts_iso: str) -> Decimal:
+        rows = self._conn.execute(
+            "SELECT realized_pnl FROM pnl_ledger WHERE ts >= ?", (ts_iso,)
+        ).fetchall()
+        return sum((Decimal(r["realized_pnl"]) for r in rows), Decimal("0"))
+
+    def orders_created_since(self, ts_iso: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM orders WHERE created_at >= ?", (ts_iso,)
+        ).fetchone()
+        return int(row["n"])
