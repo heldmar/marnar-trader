@@ -1,0 +1,27 @@
+# Portainer Repository stack `marnar-trader` (production, MarNar Server Pi 4B).
+# Secrets (BINANCE_TESTNET_API_KEY/SECRET, later Telegram) are Portainer stack
+# env vars — never in this file, never in Git.
+#
+# Local dev: docker compose -f docker-compose.yml -f docker-compose.local.yml up
+services:
+  core:
+    build: ./core
+    pull_policy: build  # known Portainer gotcha: force build over pull
+    container_name: marnar-trader-core
+    restart: unless-stopped
+    environment:
+      BINANCE_TESTNET_API_KEY: ${BINANCE_TESTNET_API_KEY}
+      BINANCE_TESTNET_API_SECRET: ${BINANCE_TESTNET_API_SECRET}
+      TZ: America/Montevideo
+    volumes:
+      # Data lives on the USB drive, not the SD card (D-13)
+      - /mnt/storage/marnar-trader:/data
+    networks:
+      - npm-network
+    mem_limit: 512m
+
+  # `ui` container arrives in Sprint 6 (NPM routes trader.example.com -> ui:80).
+
+networks:
+  npm-network:
+    external: true
