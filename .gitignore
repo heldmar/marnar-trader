@@ -29,3 +29,6 @@ build/
 # Coverage / test artifacts
 .coverage
 *.egg-info/
+
+# Local dev data volume (candles, reports, journal) — never committed
+core/.localdata/

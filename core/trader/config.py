@@ -53,6 +53,19 @@ class ScreenerConfig(BaseModel):
     quote_asset: str = "USDT"  # D-10
     min_24h_quote_volume: float = 5_000_000.0
     max_pairs: int = 20
+    # D-09 market-cap criterion: base asset must rank in the top N by market cap
+    # (CoinGecko). Pairs whose rank is unknown are kept but flagged in the report.
+    max_market_cap_rank: int = 150
+    # D-05/D-08: pilot capital used to verify each pair's minNotional is tradeable
+    # at the 10%-per-coin position size.
+    capital_usdt: float = 150.0
+    # Base assets that are themselves stable/fiat-pegged — no trend to trade.
+    exclude_bases: list[str] = ["USDC", "FDUSD", "TUSD", "DAI", "USDP", "EUR", "AEUR", "XUSD"]
+
+
+class BacktestConfig(BaseModel):
+    initial_cash_usdt: float = 150.0  # D-05 pilot sizing
+    slippage_bps: float = 5.0  # applied against us on every market fill
 
 
 class AppConfig(BaseModel):
@@ -62,12 +75,21 @@ class AppConfig(BaseModel):
     data_dir: Path = Path("/data")
     risk: RiskLimits = RiskLimits()
     screener: ScreenerConfig = ScreenerConfig()
+    backtest: BacktestConfig = BacktestConfig()
     # Testnet charges zero fees; simulations must model real fees (~0.1%/side).
     fee_rate_per_side: float = 0.001
 
     @property
     def db_path(self) -> Path:
         return self.data_dir / "journal.db"
+
+    @property
+    def candles_dir(self) -> Path:
+        return self.data_dir / "candles"
+
+    @property
+    def reports_dir(self) -> Path:
+        return self.data_dir / "reports"
 
 
 class Secrets(BaseModel):
