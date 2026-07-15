@@ -47,12 +47,16 @@ class GdeltClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self.backoff_s = backoff_s  # GDELT's penalty box is minutes, not seconds
-        self._last_request = 0.0
+        self._last_request: float | None = None
 
     def _pace(self) -> None:
-        wait = self._last_request + self.sleep_s - time.monotonic()
-        if wait > 0:
-            time.sleep(wait)
+        # None sentinel, not 0.0: monotonic() counts from boot, so on a
+        # freshly booted host (CI runner, Pi after a power cut) 0.0 would
+        # make the very first request wait.
+        if self._last_request is not None:
+            wait = self._last_request + self.sleep_s - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
         self._last_request = time.monotonic()
 
     def timeline_counts(self, query: str, start_ms: int, end_ms: int) -> list[tuple[int, int]]:
