@@ -24,9 +24,11 @@ from statistics import mean, median
 from trader.backtest import Backtester, BacktestParams, BacktestResult, Strategy
 from trader.macro_events import all_event_times_ms
 from trader.marketdata import INTERVAL_MS, Candle, CandleStore, resample
+from trader.newscounts import DEFAULT_SLUG, CandleCountLookup, NewsCountStore
 from trader.strategies import (
     DonchianBreakout,
     EventBlackout,
+    NewsSpikePause,
     RsiMeanReversion,
     TrendFollow,
 )
@@ -80,10 +82,18 @@ class Cell:
     bare: BacktestResult
     blackout: BacktestResult
     blocked_candles: int
+    news: BacktestResult | None = None  # NewsSpikePause A/B, when counts exist
+    news_blocked: int = 0
 
     @property
     def blackout_delta_pct(self) -> float:
         return self.blackout.total_return_pct - self.bare.total_return_pct
+
+    @property
+    def news_delta_pct(self) -> float | None:
+        if self.news is None:
+            return None
+        return self.news.total_return_pct - self.bare.total_return_pct
 
 
 class MatrixRunner:
@@ -94,11 +104,13 @@ class MatrixRunner:
         capital: float = 150.0,
         recent_days: int = 180,
         event_times_ms: Sequence[int] | None = None,
+        news_counts: CandleCountLookup | None = None,
         now_ms: int | None = None,
     ):
         self.store = store
         self.capital = capital
         self.recent_days = recent_days
+        self.news_counts = news_counts
         self.events = list(event_times_ms if event_times_ms is not None else all_event_times_ms())
         self.now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
         self.params = BacktestParams(initial_cash=capital)
@@ -140,7 +152,17 @@ class MatrixRunner:
                 bare = bt.run(spec.factory(), data, symbol=symbol, interval=spec.interval)
                 wrapped = EventBlackout(spec.factory(), self.events)
                 blk = bt.run(wrapped, data, symbol=symbol, interval=spec.interval)
-                cells.append(Cell(spec, symbol, window, bare, blk, wrapped.blocked_candles))
+                cell = Cell(spec, symbol, window, bare, blk, wrapped.blocked_candles)
+                if self.news_counts is not None:
+                    spiked = NewsSpikePause(
+                        spec.factory(),
+                        self.news_counts,
+                        # baseline = one day of candles at this interval
+                        baseline_candles=max(2, 86_400_000 // INTERVAL_MS[spec.interval]),
+                    )
+                    cell.news = bt.run(spiked, data, symbol=symbol, interval=spec.interval)
+                    cell.news_blocked = spiked.blocked_candles
+                cells.append(cell)
                 if progress:
                     progress(
                         f"  {symbol} {window:6s} {spec.name} @ {spec.interval}: "
@@ -162,6 +184,13 @@ def render_report(cells: list[Cell], *, capital: float, recent_days: int, genera
         "rule (entries blocked ±60 min around each event).",
         "",
     ]
+    has_news = any(c.news is not None for c in cells)
+    if has_news:
+        lines.insert(
+            -1,
+            "News Δ column: same candidate wrapped in the D-23 news-spike pause "
+            "(GDELT 15m crypto news counts, entries paused on 3x-baseline spikes).",
+        )
     specs = sorted({(c.spec.rhythm, c.spec.name, c.spec.interval) for c in cells})
     for rhythm, name, interval in specs:
         group = [
@@ -172,32 +201,44 @@ def render_report(cells: list[Cell], *, capital: float, recent_days: int, genera
             f"## {name} @ {interval}  ({rhythm})",
             "",
             "| Pair | Window | Return | Max DD | Trips | Win rate | Fees | "
-            "Blackout Δ | Blocked candles |",
+            "Blackout Δ | Blocked candles |" + (" News Δ | Paused candles |" if has_news else ""),
             "|------|--------|--------|--------|-------|----------|------|"
-            "-----------|-----------------|",
+            "-----------|-----------------|" + ("--------|----------------|" if has_news else ""),
         ]
         for c in sorted(group, key=lambda c: (c.symbol, c.window)):
             wr = c.bare.win_rate_pct
-            lines.append(
+            row = (
                 f"| {c.symbol} | {c.window} | {c.bare.total_return_pct:+.2f}% | "
                 f"{c.bare.max_drawdown_pct:.2f}% | {c.bare.round_trips} | "
                 f"{'n/a' if wr is None else f'{wr:.0f}%'} | "
                 f"{c.bare.total_fees:.2f} | {c.blackout_delta_pct:+.2f}pp | "
                 f"{c.blocked_candles} |"
             )
+            if has_news:
+                nd = c.news_delta_pct
+                row += (
+                    f" {'n/a' if nd is None else f'{nd:+.2f}pp'} | {c.news_blocked} |"
+                )
+            lines.append(row)
         full = [c for c in group if c.window == "full"]
         recent = [c for c in group if c.window == "recent"]
         for label, sub in (("full", full), ("recent", recent)):
             if not sub:
                 continue
             rets = [c.bare.total_return_pct for c in sub]
-            lines.append(
+            agg = (
                 f"| **all ({label})** | | mean {mean(rets):+.2f}% / median "
                 f"{median(rets):+.2f}% | worst {max(c.bare.max_drawdown_pct for c in sub):.2f}% | "
                 f"{sum(c.bare.round_trips for c in sub)} | | "
                 f"{sum(c.bare.total_fees for c in sub):.2f} | "
                 f"mean {mean(c.blackout_delta_pct for c in sub):+.2f}pp | |"
             )
+            if has_news:
+                deltas = [d for c in sub if (d := c.news_delta_pct) is not None]
+                agg += (
+                    f" mean {mean(deltas):+.2f}pp | |" if deltas else " | |"
+                )
+            lines.append(agg)
         lines.append("")
     return "\n".join(lines) + "\n"
 
@@ -219,7 +260,16 @@ def main() -> int:
     if args.data_dir:
         config = config.model_copy(update={"data_dir": Path(args.data_dir)})
     store = CandleStore(config.candles_dir)
-    runner = MatrixRunner(store, capital=args.capital, recent_days=args.recent_days)
+    news_store = NewsCountStore(config.data_dir / "news")
+    counts = news_store.read(DEFAULT_SLUG)
+    lookup = CandleCountLookup(counts) if counts else None
+    if lookup:
+        print(f"News counts loaded: {len(counts)} buckets — news-spike A/B enabled.")
+    else:
+        print("No news counts stored (run trader.newscounts) — news-spike A/B skipped.")
+    runner = MatrixRunner(
+        store, capital=args.capital, recent_days=args.recent_days, news_counts=lookup
+    )
 
     symbols = args.symbols or runner.discover_symbols()
     if not symbols:
