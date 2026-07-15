@@ -84,3 +84,47 @@ class TestGdeltClientParsing:
         monkeypatch.setattr("time.sleep", lambda s: slept.append(s))
         client._pace()  # first call must not sleep
         assert slept == []
+
+    def test_retries_throttle_then_succeeds(self, monkeypatch):
+        import requests
+
+        client = GdeltClient(backoff_s=75.0, max_retries=3)
+        slept: list[float] = []
+        monkeypatch.setattr("time.sleep", lambda s: slept.append(s))
+        attempts = {"n": 0}
+
+        def flaky(query, start_ms, end_ms):
+            attempts["n"] += 1
+            if attempts["n"] <= 2:
+                resp = requests.Response()
+                resp.status_code = 429
+                raise requests.HTTPError(response=resp)
+            return [(T0, 1)]
+
+        monkeypatch.setattr(client, "_timeline_counts_once", flaky)
+        assert client.timeline_counts("q", T0, T0 + DAY) == [(T0, 1)]
+        assert slept == [75.0, 75.0]
+
+    def test_gives_up_after_max_retries(self, monkeypatch):
+        client = GdeltClient(backoff_s=0.0, max_retries=2)
+        monkeypatch.setattr("time.sleep", lambda s: None)
+
+        def always_throttled(query, start_ms, end_ms):
+            raise RuntimeError("GDELT non-JSON response: 'Please limit requests to one every'")
+
+        monkeypatch.setattr(client, "_timeline_counts_once", always_throttled)
+        with pytest.raises(RuntimeError, match="still throttling"):
+            client.timeline_counts("q", T0, T0 + DAY)
+
+    def test_degraded_resolution_not_retried(self, monkeypatch):
+        client = GdeltClient()
+        calls = {"n": 0}
+
+        def degraded(query, start_ms, end_ms):
+            calls["n"] += 1
+            raise RuntimeError("GDELT degraded resolution 'day' — chunk too large")
+
+        monkeypatch.setattr(client, "_timeline_counts_once", degraded)
+        with pytest.raises(RuntimeError, match="degraded"):
+            client.timeline_counts("q", T0, T0 + DAY)
+        assert calls["n"] == 1

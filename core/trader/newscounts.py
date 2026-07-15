@@ -35,9 +35,18 @@ _SCHEMA = pa.schema([("ts_ms", pa.int64()), ("count", pa.int64())])
 class GdeltClient:
     """Minimal, politely-paced GDELT DOC client. One query mode, no key."""
 
-    def __init__(self, *, sleep_s: float = 5.5, timeout: float = 30.0):
+    def __init__(
+        self,
+        *,
+        sleep_s: float = 5.5,
+        timeout: float = 30.0,
+        max_retries: int = 8,
+        backoff_s: float = 75.0,
+    ):
         self.sleep_s = sleep_s
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.backoff_s = backoff_s  # GDELT's penalty box is minutes, not seconds
         self._last_request = 0.0
 
     def _pace(self) -> None:
@@ -48,8 +57,33 @@ class GdeltClient:
 
     def timeline_counts(self, query: str, start_ms: int, end_ms: int) -> list[tuple[int, int]]:
         """15m (ts_ms, raw article count) buckets for [start_ms, end_ms].
-        Raises RuntimeError on throttle/HTML responses so the caller can back
-        off instead of storing garbage."""
+        Retries throttle responses (429 / plain-text limit message) with a long
+        backoff; raises RuntimeError once retries are exhausted or on a
+        degraded-resolution response (chunk too large — a config bug, not
+        weather)."""
+        import requests
+
+        for attempt in range(self.max_retries + 1):
+            try:
+                return self._timeline_counts_once(query, start_ms, end_ms)
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                throttled = status == 429
+            except RuntimeError as exc:
+                if "degraded resolution" in str(exc):
+                    raise
+                throttled = "limit requests" in str(exc).lower()
+            if not throttled or attempt == self.max_retries:
+                raise RuntimeError(
+                    f"GDELT still throttling after {attempt} retries "
+                    f"({self.backoff_s:.0f}s apart) — try again later"
+                )
+            time.sleep(self.backoff_s)
+        raise AssertionError("unreachable")
+
+    def _timeline_counts_once(
+        self, query: str, start_ms: int, end_ms: int
+    ) -> list[tuple[int, int]]:
         import requests
 
         self._pace()
