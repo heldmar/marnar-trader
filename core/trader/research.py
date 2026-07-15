@@ -254,6 +254,11 @@ def main() -> int:
     parser.add_argument("--symbols", nargs="*", default=None)
     parser.add_argument("--recent-days", type=int, default=180)
     parser.add_argument("--capital", type=float, default=150.0)
+    parser.add_argument(
+        "--no-news", action="store_true",
+        help="skip the news-spike A/B even if counts are stored "
+        "(use while a counts backfill is still partial)",
+    )
     args = parser.parse_args()
 
     config = load_config()
@@ -261,7 +266,7 @@ def main() -> int:
         config = config.model_copy(update={"data_dir": Path(args.data_dir)})
     store = CandleStore(config.candles_dir)
     news_store = NewsCountStore(config.data_dir / "news")
-    counts = news_store.read(DEFAULT_SLUG)
+    counts = {} if args.no_news else news_store.read(DEFAULT_SLUG)
     lookup = CandleCountLookup(counts) if counts else None
     if lookup:
         print(f"News counts loaded: {len(counts)} buckets — news-spike A/B enabled.")
