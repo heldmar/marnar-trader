@@ -77,6 +77,40 @@ def candle_from_kline(row: list[Any]) -> Candle:
     )
 
 
+def resample(candles: list[Candle], target_ms: int) -> list[Candle]:
+    """Aggregate finer candles into *target_ms* buckets aligned on the epoch
+    (Binance's own alignment). Buckets missing their opening source candle keep
+    the first candle actually seen — same as Binance building bars from trades.
+    Trailing partial buckets are kept: caller decides whether the last bar is
+    complete (same rule the downloader applies at the live edge)."""
+    out: list[Candle] = []
+    bucket: list[Candle] = []
+    bucket_start: int | None = None
+    for c in candles:
+        start = c.open_time - (c.open_time % target_ms)
+        if bucket_start is None or start != bucket_start:
+            if bucket:
+                out.append(_merge_bucket(bucket, bucket_start))  # type: ignore[arg-type]
+            bucket, bucket_start = [], start
+        bucket.append(c)
+    if bucket:
+        out.append(_merge_bucket(bucket, bucket_start))  # type: ignore[arg-type]
+    return out
+
+
+def _merge_bucket(bucket: list[Candle], open_time: int) -> Candle:
+    return Candle(
+        open_time=open_time,
+        open=bucket[0].open,
+        high=max(c.high for c in bucket),
+        low=min(c.low for c in bucket),
+        close=bucket[-1].close,
+        volume=sum(c.volume for c in bucket),
+        quote_volume=sum(c.quote_volume for c in bucket),
+        trades=sum(c.trades for c in bucket),
+    )
+
+
 class MarketDataClient(Protocol):
     """The slice of public market data S3 needs (no auth, read-only)."""
 
