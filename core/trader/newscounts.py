@@ -226,13 +226,19 @@ def main() -> int:
     parser.add_argument("--slug", default=DEFAULT_SLUG)
     parser.add_argument("--days", type=int, default=730)
     parser.add_argument("--data-dir", default=None)
+    parser.add_argument("--sleep", type=float, default=5.5, help="seconds between requests")
+    parser.add_argument("--retries", type=int, default=8, help="throttle retries per chunk")
+    parser.add_argument("--backoff", type=float, default=75.0, help="seconds between retries")
     args = parser.parse_args()
 
     config = load_config()
     if args.data_dir:
         config = config.model_copy(update={"data_dir": Path(args.data_dir)})
     store = NewsCountStore(config.data_dir / "news")
-    backfiller = NewsBackfiller(GdeltClient(), store)
+    client = GdeltClient(
+        sleep_s=args.sleep, max_retries=args.retries, backoff_s=args.backoff
+    )
+    backfiller = NewsBackfiller(client, store)
     print(f"[{args.slug}] backfilling {args.days}d of news counts for {args.query!r}...")
     added = backfiller.backfill(args.query, args.slug, days=args.days, progress=print)
     print(f"[{args.slug}] done: +{added} buckets, coverage {store.coverage(args.slug)}")
