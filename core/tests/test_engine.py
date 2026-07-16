@@ -6,6 +6,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from test_paper import FakePrices
 
 from trader.config import RiskLimits
 from trader.engine import PaperEngine
@@ -14,8 +15,6 @@ from trader.journal import Journal
 from trader.marketdata import INTERVAL_MS, CandleStore
 from trader.paper import PaperGateway
 from trader.risk import RiskManager
-
-from test_paper import FakePrices
 
 H = INTERVAL_MS["1h"]
 T0 = 1_760_000_000_000 - (1_760_000_000_000 % H)  # aligned epoch base

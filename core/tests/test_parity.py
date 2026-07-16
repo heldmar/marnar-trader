@@ -93,13 +93,13 @@ def test_render_report_flags_band_breaches(journal, tmp_path):
 
 def test_paper_equity_math_matches_gateway(tmp_path):
     """The journal-reconstructed cash must equal the paper account's balance."""
+    from test_paper import FakePrices
+
     from trader.config import RiskLimits
     from trader.execution import OrderManager
     from trader.journal import Journal
     from trader.paper import PaperGateway
     from trader.risk import RiskManager
-
-    from test_paper import FakePrices
 
     prices = FakePrices({"BTCUSDT": "100"})
     paper = PaperGateway(tmp_path / "p.json", prices, initial_usdt=Decimal("150"))
