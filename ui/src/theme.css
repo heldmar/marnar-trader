@@ -1,0 +1,206 @@
+/* MarNar Trader design system — sage/cream, light only (UI-06).
+   Audience is a non-financial user (UI-12): calm colors, plain words,
+   money always green-for-gain / clay-for-loss (UI-14). */
+
+:root {
+  /* palette */
+  --cream: #f6f3ec;
+  --cream-card: #fffdf8;
+  --ink: #2e352e;
+  --ink-soft: #6c756c;
+  --line: #e3ded2;
+  --sage: #6b8f71;
+  --sage-deep: #3e5641;
+  --sage-tint: #e8efe8;
+  --gain: #3e7d4f;
+  --gain-bg: #e3efe5;
+  --loss: #b8563f;
+  --loss-bg: #f6e5df;
+  --amber: #9a6b1f;
+  --amber-bg: #fbedcd;
+  --danger: #b03a2e;
+  --danger-deep: #8f2d23;
+
+  font-family: 'Avenir Next', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  color: var(--ink);
+  background: var(--cream);
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { background: var(--cream); min-height: 100vh; }
+
+/* Numbers line up in columns everywhere (UI-07). */
+.num, td.num, .money { font-variant-numeric: tabular-nums; }
+
+h1, h2, h3 { color: var(--sage-deep); font-weight: 650; margin: 0; }
+a { color: var(--sage-deep); }
+
+.app-shell { max-width: 980px; margin: 0 auto; padding: 0 16px 48px; }
+
+/* ---- header ------------------------------------------------------------ */
+
+.topbar {
+  display: flex; align-items: center; gap: 16px;
+  padding: 14px 0 10px;
+}
+.wordmark { font-size: 1.35rem; letter-spacing: 0.02em; color: var(--sage-deep); }
+.wordmark b { font-weight: 750; }
+.wordmark span { font-weight: 400; color: var(--sage); }
+
+.nav { display: flex; gap: 4px; margin-left: auto; }
+.nav button {
+  border: none; background: none; font: inherit; color: var(--ink-soft);
+  padding: 8px 14px; border-radius: 999px; cursor: pointer;
+}
+.nav button:hover { background: var(--sage-tint); }
+.nav button.active { background: var(--sage-deep); color: var(--cream-card); }
+
+/* Amber banner whenever real money is not involved (UI-05). */
+.testmode {
+  background: var(--amber-bg); color: var(--amber);
+  border: 1px solid #ecd9a8; border-radius: 10px;
+  padding: 8px 14px; margin: 4px 0 16px;
+  font-weight: 600; text-align: center;
+}
+
+/* ---- cards / layout ---------------------------------------------------- */
+
+.card {
+  background: var(--cream-card); border: 1px solid var(--line);
+  border-radius: 14px; padding: 18px 20px; margin-bottom: 16px;
+}
+.card h2 { font-size: 1.02rem; margin-bottom: 10px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+
+.muted { color: var(--ink-soft); font-size: 0.9rem; }
+.small { font-size: 0.84rem; }
+
+/* ---- hero (UI-02, UI-14): the one-glance answer ------------------------ */
+
+.hero { text-align: center; padding: 26px 20px 20px; }
+.hero .headline { font-size: 1.15rem; color: var(--ink-soft); }
+.hero .amount { font-size: 3rem; font-weight: 750; margin: 2px 0; }
+.hero .amount.gain { color: var(--gain); }
+.hero .amount.loss { color: var(--loss); }
+.hero .amount.flat { color: var(--ink); }
+.hero .subline { color: var(--ink-soft); }
+
+.gain-text { color: var(--gain); font-weight: 650; }
+.loss-text { color: var(--loss); font-weight: 650; }
+
+/* ---- pills / status ---------------------------------------------------- */
+
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  border-radius: 999px; padding: 3px 12px; font-size: 0.84rem; font-weight: 600;
+}
+.pill.ok { background: var(--gain-bg); color: var(--gain); }
+.pill.warn { background: var(--amber-bg); color: var(--amber); }
+.pill.bad { background: var(--loss-bg); color: var(--danger); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+
+/* ---- kill switch (UI-04): red, present on every screen ------------------ */
+
+.kill-btn {
+  background: var(--danger); color: #fff; border: none; font: inherit;
+  font-weight: 700; padding: 9px 18px; border-radius: 10px; cursor: pointer;
+}
+.kill-btn:hover { background: var(--danger-deep); }
+
+.resume-btn {
+  background: var(--sage-deep); color: #fff; border: none; font: inherit;
+  font-weight: 700; padding: 9px 18px; border-radius: 10px; cursor: pointer;
+}
+
+/* ---- modal -------------------------------------------------------------- */
+
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(46, 53, 46, 0.45);
+  display: flex; align-items: center; justify-content: center; z-index: 40;
+  padding: 16px;
+}
+.modal {
+  background: var(--cream-card); border-radius: 16px; padding: 24px;
+  max-width: 460px; width: 100%; border: 1px solid var(--line);
+}
+.modal h2 { margin-bottom: 8px; }
+.modal .choices { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
+.modal .choices button {
+  font: inherit; text-align: left; padding: 12px 14px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--cream); cursor: pointer;
+}
+.modal .choices button:hover { border-color: var(--danger); }
+.modal .choices button b { display: block; }
+.modal .cancel {
+  border: none; background: none; font: inherit; color: var(--ink-soft);
+  cursor: pointer; padding: 8px;
+}
+
+/* ---- tables (deep layers may be numeric, UI-15) -------------------------- */
+
+table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+th {
+  text-align: left; color: var(--ink-soft); font-weight: 600;
+  padding: 6px 8px; border-bottom: 1px solid var(--line); font-size: 0.82rem;
+}
+td { padding: 8px; border-bottom: 1px solid var(--line); }
+td.num, th.num { text-align: right; }
+tr:last-child td { border-bottom: none; }
+
+/* ---- timeline ------------------------------------------------------------ */
+
+.tl-item { display: flex; gap: 14px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.tl-item:last-child { border-bottom: none; }
+.tl-when { min-width: 118px; color: var(--ink-soft); font-size: 0.82rem; padding-top: 2px; }
+.tl-body { flex: 1; min-width: 0; }
+.tl-title { font-weight: 650; }
+.tl-title .buy { color: var(--sage-deep); }
+.tl-title .sell { color: var(--amber); }
+.reason {
+  background: var(--sage-tint); border-radius: 8px; padding: 8px 10px;
+  margin-top: 6px; font-size: 0.9rem;
+}
+.newsbox { margin-top: 6px; }
+.newsbox summary { cursor: pointer; color: var(--ink-soft); font-size: 0.84rem; }
+.newsbox ul { margin: 6px 0 0; padding-left: 18px; font-size: 0.86rem; }
+.newsbox li { margin-bottom: 3px; }
+.sysline { color: var(--ink-soft); font-size: 0.9rem; }
+
+/* ---- forms (settings) ----------------------------------------------------- */
+
+label.field { display: block; margin-bottom: 12px; }
+label.field .name { font-weight: 600; font-size: 0.9rem; }
+label.field .help { color: var(--ink-soft); font-size: 0.82rem; margin-bottom: 4px; }
+input[type='number'], input[type='text'] {
+  font: inherit; padding: 8px 10px; border: 1px solid var(--line);
+  border-radius: 8px; background: #fff; width: 130px;
+  font-variant-numeric: tabular-nums;
+}
+input:focus { outline: 2px solid var(--sage); border-color: var(--sage); }
+.save-btn {
+  background: var(--sage-deep); color: #fff; border: none; font: inherit;
+  font-weight: 700; padding: 10px 20px; border-radius: 10px; cursor: pointer;
+}
+.save-btn:disabled { opacity: 0.5; cursor: default; }
+.floor-note { color: var(--ink-soft); font-size: 0.8rem; }
+
+.notice { border-radius: 10px; padding: 10px 14px; margin: 10px 0; font-size: 0.92rem; }
+.notice.warn { background: var(--amber-bg); color: var(--amber); }
+.notice.bad { background: var(--loss-bg); color: var(--danger); }
+.notice.ok { background: var(--gain-bg); color: var(--gain); }
+
+/* ---- charts --------------------------------------------------------------- */
+
+.chart-empty {
+  color: var(--ink-soft); text-align: center; padding: 32px 0; font-size: 0.9rem;
+}
+.legend { display: flex; gap: 16px; font-size: 0.8rem; color: var(--ink-soft); margin-top: 6px; }
+.legend .key { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+
+.healthrow { display: flex; flex-wrap: wrap; gap: 10px; }
+
+.loading { color: var(--ink-soft); text-align: center; padding: 40px; }

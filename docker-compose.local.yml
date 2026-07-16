@@ -9,6 +9,12 @@ services:
     volumes: !override
       - trader-data-local:/data
 
+  ui:
+    ports:
+      - "127.0.0.1:18081:80"
+    networks: !override
+      - default
+
 volumes:
   trader-data-local: {}
 

@@ -24,7 +24,19 @@ services:
       - npm-network
     mem_limit: 512m
 
-  # `ui` container arrives in Sprint 6 (NPM routes trader.example.com -> ui:80).
+  # Web UI (S6): static SPA + same-origin /api proxy to core. Only this
+  # container is routed publicly (NPM: trader.example.com -> ui:80, behind the
+  # NPM access list, D-16); core itself is never exposed.
+  ui:
+    build: ./ui
+    pull_policy: build
+    container_name: marnar-trader-ui
+    restart: unless-stopped
+    depends_on:
+      - core
+    networks:
+      - npm-network
+    mem_limit: 64m
 
 networks:
   npm-network:
