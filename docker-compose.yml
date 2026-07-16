@@ -1,5 +1,5 @@
 # Portainer Repository stack `marnar-trader` (production, MarNar Server Pi 4B).
-# Secrets (BINANCE_TESTNET_API_KEY/SECRET, later Telegram) are Portainer stack
+# Secrets (TELEGRAM_*, BINANCE_TESTNET_* when used) are Portainer stack
 # env vars — never in this file, never in Git.
 #
 # Local dev: docker compose -f docker-compose.yml -f docker-compose.local.yml up
@@ -10,8 +10,12 @@ services:
     container_name: marnar-trader-core
     restart: unless-stopped
     environment:
-      BINANCE_TESTNET_API_KEY: ${BINANCE_TESTNET_API_KEY}
-      BINANCE_TESTNET_API_SECRET: ${BINANCE_TESTNET_API_SECRET}
+      # Paper mode (S5) needs no exchange keys; testnet vars stay optional
+      # so the same stack can run either mode via /data/config.yaml.
+      BINANCE_TESTNET_API_KEY: ${BINANCE_TESTNET_API_KEY:-}
+      BINANCE_TESTNET_API_SECRET: ${BINANCE_TESTNET_API_SECRET:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       TZ: America/Montevideo
     volumes:
       # Data lives on the USB drive, not the SD card (D-13)
