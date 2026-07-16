@@ -59,6 +59,32 @@ class OrderManager:
             price=price, source=source, nonce=nonce or new_nonce(),
         )
 
+    def submit_market(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: str,
+        mark_price: Decimal,
+        equity: Decimal,
+        source: str,
+        nonce: str | None = None,
+    ) -> str:
+        """Risk-gated market order (S5 strategy engine entry point). *mark_price*
+        is the caller's live reference price — used only for the risk notional
+        check; the fill price is the exchange's business."""
+        notional = Decimal(quantity) * mark_price
+        decision = self._risk.evaluate_intent(
+            symbol=symbol, side=side, notional=notional, equity=equity
+        )
+        if not decision.approved:
+            self._journal.record_event("RISK_REJECTED", symbol, {"reason": decision.reason})
+            raise OrderRejected(decision.reason)
+        return self._place(
+            symbol=symbol, side=side, order_type="MARKET", quantity=quantity,
+            price=None, source=source, nonce=nonce or new_nonce(),
+        )
+
     def _place(
         self,
         *,
@@ -101,6 +127,16 @@ class OrderManager:
                 fee_asset=f.get("commissionAsset"),
                 executed_at=utcnow(),
             )
+
+    def exit_market(self, *, symbol: str, quantity: str, reason: str) -> str:
+        """Protective exit (engine-held stop-loss / take-profit). Bypasses the
+        intent gate on the same principle as force_flat: a restriction layer
+        must never block reducing risk — but the order is journaled like any
+        other, with the trigger in its source."""
+        return self._place(
+            symbol=symbol, side="SELL", order_type="MARKET", quantity=quantity,
+            price=None, source=f"protective:{reason}", nonce=new_nonce(),
+        )
 
     # -- cancels & halts -------------------------------------------------------------
 

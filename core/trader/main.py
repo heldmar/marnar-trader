@@ -7,14 +7,17 @@ clean does trading unlock. The kill switch is available regardless.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from decimal import Decimal
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from trader import __version__
+from trader.alerts import TelegramAlerts
 from trader.config import Secrets, load_config
 from trader.execution import OrderManager
 from trader.gateway import BinanceGateway
@@ -39,13 +42,23 @@ async def lifespan(app: FastAPI):
     app.state.trading_enabled = False
     app.state.risk = RiskManager(app.state.journal, config.risk, config.timezone)
 
-    secrets = Secrets.from_env(config.mode)
-    if secrets.binance_api_key:
-        app.state.gateway = BinanceGateway(
-            secrets.binance_api_key, secrets.binance_api_secret, testnet=True
+    tasks: list[asyncio.Task] = []
+    if config.mode == "paper":
+        # Paper mode (S5): live production market data, simulated account.
+        # No Binance credentials involved — the paper exchange needs none.
+        from trader.engine import PaperEngine
+        from trader.marketdata import BinancePublicData, CandleStore
+        from trader.news import NewsIngestor
+        from trader.paper import BinancePublicPrices, PaperGateway
+
+        app.state.gateway = PaperGateway(
+            config.data_dir / "paper-account.json",
+            BinancePublicPrices(),
+            initial_usdt=Decimal(str(config.paper.initial_usdt)),
+            fee_rate=Decimal(str(config.fee_rate_per_side)),
+            slippage_bps=Decimal(str(config.backtest.slippage_bps)),
         )
         app.state.orders = OrderManager(app.state.journal, app.state.gateway, app.state.risk)
-        # Reconcile FIRST, trade second — trading stays locked on a dirty report.
         try:
             report = Reconciler(app.state.journal, app.state.gateway).run()
             app.state.reconciliation = report.summary()
@@ -53,13 +66,61 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             log.error("reconciliation failed hard: %s", exc)
             app.state.reconciliation = {"clean": False, "errors": [str(exc)]}
+        if app.state.trading_enabled:
+            alerts = TelegramAlerts.from_env()
+            engine = PaperEngine(
+                journal=app.state.journal,
+                gateway=app.state.gateway,
+                orders=app.state.orders,
+                risk=app.state.risk,
+                market=BinancePublicData(),
+                store=CandleStore(config.candles_dir),
+                symbols=config.paper.symbols,
+                interval=config.paper.interval,
+                entry_n=config.paper.entry_n,
+                exit_n=config.paper.exit_n,
+                stop_loss_pct=config.paper.stop_loss_pct,
+                spend_usdt=config.paper.spend_usdt,
+                poll_seconds=config.paper.poll_seconds,
+                alerts=alerts,
+                event_blackout=config.paper.event_blackout,
+            )
+            app.state.engine = engine
+            tasks.append(asyncio.create_task(engine.run(), name="paper-engine"))
+            tasks.append(
+                asyncio.create_task(
+                    NewsIngestor(app.state.journal).run(
+                        every_seconds=config.paper.news_ingest_seconds
+                    ),
+                    name="news-ingest",
+                )
+            )
+        else:
+            log.error("paper engine NOT started: reconciliation was not clean")
     else:
-        log.warning("no Binance credentials in environment — exchange connectivity disabled")
+        secrets = Secrets.from_env(config.mode)
+        if secrets.binance_api_key:
+            app.state.gateway = BinanceGateway(
+                secrets.binance_api_key, secrets.binance_api_secret, testnet=True
+            )
+            app.state.orders = OrderManager(app.state.journal, app.state.gateway, app.state.risk)
+            # Reconcile FIRST, trade second — trading stays locked on a dirty report.
+            try:
+                report = Reconciler(app.state.journal, app.state.gateway).run()
+                app.state.reconciliation = report.summary()
+                app.state.trading_enabled = report.clean
+            except Exception as exc:
+                log.error("reconciliation failed hard: %s", exc)
+                app.state.reconciliation = {"clean": False, "errors": [str(exc)]}
+        else:
+            log.warning("no Binance credentials in environment — exchange connectivity disabled")
     log.info(
         "core started: mode=%s db=%s trading_enabled=%s risk=%s",
         config.mode, config.db_path, app.state.trading_enabled, app.state.risk.state.value,
     )
     yield
+    for task in tasks:
+        task.cancel()
     app.state.journal.close()
 
 

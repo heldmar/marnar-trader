@@ -23,7 +23,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -108,11 +108,24 @@ CREATE TABLE IF NOT EXISTS app_state (
     value      TEXT NOT NULL,                  -- JSON
     updated_at TEXT NOT NULL
 );
+
+-- v3 (Sprint 5) --------------------------------------------------------------
+
+-- News headlines (D-23: ingested from S5, shown as trade-timeline context at
+-- S6). Context only — no strategy reads this table; truthful attribution.
+CREATE TABLE IF NOT EXISTS news_items (
+    url        TEXT PRIMARY KEY,               -- dedupe key
+    seen_at    TEXT NOT NULL,                  -- when WE stored it (ISO-8601 UTC)
+    published  TEXT,                           -- source-claimed publication time
+    source     TEXT,                           -- domain
+    title      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_news_seen ON news_items(seen_at);
 """
 
 # Tables added by each version bump; applying the base _SCHEMA (all CREATE IF
 # NOT EXISTS) migrates any older DB forward, so migrations stay additive-only.
-_ADDITIVE_VERSIONS = {1, 2}
+_ADDITIVE_VERSIONS = {1, 2, 3}
 
 
 def utcnow() -> str:
@@ -355,6 +368,25 @@ class Journal:
                 (key, json.dumps(value, default=str), utcnow()),
             )
 
+    # -- news (D-23a: context only, no strategy reads this) --------------------
+
+    def record_news_item(
+        self, *, url: str, title: str, source: str | None, published: str | None, seen_at: str
+    ) -> bool:
+        """Store a headline; returns False if the URL was already known."""
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO news_items(url, seen_at, published, source, title)"
+                " VALUES (?,?,?,?,?)",
+                (url, seen_at, published, source, title),
+            )
+            return cur.rowcount > 0
+
+    def news_since(self, ts_iso: str) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT * FROM news_items WHERE seen_at >= ? ORDER BY seen_at", (ts_iso,)
+        ).fetchall()
+
     # -- reads ----------------------------------------------------------------
 
     def get_order(self, client_order_id: str) -> sqlite3.Row | None:
@@ -380,6 +412,15 @@ class Journal:
         return self._conn.execute(
             "SELECT * FROM positions WHERE symbol=?", (symbol,)
         ).fetchone()
+
+    def fills_with_side(self) -> list[sqlite3.Row]:
+        """All fills joined to their order's side (parity report input)."""
+        return self._conn.execute(
+            "SELECT o.side AS side, o.symbol AS symbol, f.quantity AS quantity,"
+            " f.price AS price, f.fee AS fee, f.executed_at AS executed_at"
+            " FROM fills f JOIN orders o ON o.client_order_id = f.client_order_id"
+            " ORDER BY f.executed_at"
+        ).fetchall()
 
     def realized_pnl_since(self, ts_iso: str) -> Decimal:
         rows = self._conn.execute(
