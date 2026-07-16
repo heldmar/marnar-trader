@@ -129,6 +129,9 @@ class DonchianBreakout:
         self.sl, self.tp = stop_loss_pct, take_profit_pct
         self._highs: deque[float] = deque(maxlen=entry_n)
         self._lows: deque[float] = deque(maxlen=exit_n)
+        # Why the last signal fired (rule + numbers) — journaled by the live
+        # engine for the UI trade timeline (D-23 truthful attribution).
+        self.last_signal: dict | None = None
 
     def on_candle(self, candle: Candle, ctx: StrategyContext) -> None:
         entry_ready = len(self._highs) == self.entry_n
@@ -140,8 +143,18 @@ class DonchianBreakout:
         self._highs.append(candle.high)
         self._lows.append(candle.low)
         if ctx.position.qty == 0 and upper is not None and candle.close > upper:
+            self.last_signal = {
+                "rule": f"close broke above the {self.entry_n}-candle high",
+                "close": candle.close, "level": upper, "n": self.entry_n,
+                "candle_open_time": candle.open_time,
+            }
             ctx.buy(self.spend, stop_loss_pct=self.sl, take_profit_pct=self.tp)
         elif ctx.position.qty > 0 and lower is not None and candle.close < lower:
+            self.last_signal = {
+                "rule": f"close fell below the {self.exit_n}-candle low",
+                "close": candle.close, "level": lower, "n": self.exit_n,
+                "candle_open_time": candle.open_time,
+            }
             ctx.sell_all()
 
 

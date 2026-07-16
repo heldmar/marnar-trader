@@ -206,6 +206,7 @@ class PaperEngine:
         for symbol in self.symbols:
             self._process_new_candles(symbol)
         equity = Decimal(str(self.gateway.equity_usdt()))
+        self._snapshot_equity(equity)
         result = halt_and_apply(self.risk, self.orders, equity)
         if result is not None:
             for symbol in self.symbols:  # positions are gone or intentional — clear stops
@@ -215,6 +216,15 @@ class PaperEngine:
                 f"orders, closed {len(result['closed_positions'])} positions. "
                 "Manual /api/resume required."
             )
+
+    SNAPSHOT_EVERY_MS = 15 * 60 * 1000  # UI equity curve granularity
+
+    def _snapshot_equity(self, equity: Decimal) -> None:
+        last = self.journal.get_state("engine:last_equity_snapshot") or 0
+        now = self.now_ms()
+        if now - last >= self.SNAPSHOT_EVERY_MS:
+            self.journal.record_equity_snapshot(str(equity))
+            self.journal.set_state("engine:last_equity_snapshot", now)
 
     # -- candles ---------------------------------------------------------------------
 
@@ -242,12 +252,15 @@ class PaperEngine:
         self.store.append(symbol, self.interval, candles)
         for candle in candles:
             ctx = LiveContext(self._position_qty(symbol), float(self._usdt_free()))
-            self.strategies[symbol].on_candle(candle, ctx)  # type: ignore[arg-type]
+            strategy = self.strategies[symbol]
+            strategy.on_candle(candle, ctx)  # type: ignore[arg-type]
+            # Unwrap restrict-only wrappers (EventBlackout) to reach the signal.
+            signal = getattr(getattr(strategy, "inner", strategy), "last_signal", None)
             for side, quote_amount, sl_pct, tp_pct in ctx.requests:
                 if side == "BUY":
-                    self._execute_buy(symbol, quote_amount, sl_pct, tp_pct)
+                    self._execute_buy(symbol, quote_amount, sl_pct, tp_pct, signal=signal)
                 else:
-                    self._execute_sell(symbol, "strategy exit")
+                    self._execute_sell(symbol, "strategy exit", signal=signal)
             self.journal.set_state(key, candle.open_time)
 
     # -- account helpers ---------------------------------------------------------------
@@ -262,7 +275,12 @@ class PaperEngine:
     # -- order execution ------------------------------------------------------------------
 
     def _execute_buy(
-        self, symbol: str, quote_amount: float, sl_pct: float | None, tp_pct: float | None
+        self,
+        symbol: str,
+        quote_amount: float,
+        sl_pct: float | None,
+        tp_pct: float | None,
+        signal: dict | None = None,
     ) -> None:
         price = self.gateway.ticker_price(symbol)
         filters = self.gateway.symbol_filters(symbol)
@@ -283,6 +301,8 @@ class PaperEngine:
         except OrderRejected as exc:
             log.info("entry rejected by risk: %s %s", symbol, exc)
             return
+        if signal:
+            self.journal.record_event("TRADE_REASON", coid, {**signal, "symbol": symbol})
         fill_price = self._avg_fill_price(coid) or price
         protect = {
             "stop": str(fill_price * (1 - Decimal(str(sl_pct)) / 100)) if sl_pct else None,
@@ -294,7 +314,9 @@ class PaperEngine:
             f"(stop {protect['stop'] or '—'}, target {protect['tp'] or '—'})"
         )
 
-    def _execute_sell(self, symbol: str, reason: str, *, protective: bool = False) -> None:
+    def _execute_sell(
+        self, symbol: str, reason: str, *, protective: bool = False, signal: dict | None = None
+    ) -> None:
         pos = self.journal.position_for(symbol)
         if pos is None:
             return
@@ -316,6 +338,11 @@ class PaperEngine:
             log.warning("sell rejected (%s): %s %s", reason, symbol, exc)
             return
         self.journal.set_state(PROTECT_KEY.format(symbol=symbol), None)
+        if signal or protective:
+            payload = {**(signal or {}), "symbol": symbol}
+            if protective:
+                payload["rule"] = f"protective {reason} level was hit"
+            self.journal.record_event("TRADE_REASON", coid, payload)
         fill_price = self._avg_fill_price(coid) or price
         self.alerts.send(f"🔴 SELL {qty} {symbol} @ ~{fill_price} ({reason})")
 

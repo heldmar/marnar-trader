@@ -183,3 +183,4 @@ class RiskManager:
     def resume(self, who: str = "investor") -> None:
         """Manual reactivation (required after drawdown/manual halts, D-07)."""
         self._set_halt(HaltState.RUNNING, f"resumed by {who}")
+        self._journal.record_event("RESUMED", "risk", {"who": who})

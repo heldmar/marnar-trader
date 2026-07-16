@@ -18,12 +18,12 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -121,11 +121,20 @@ CREATE TABLE IF NOT EXISTS news_items (
     title      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_news_seen ON news_items(seen_at);
+
+-- v4 (Sprint 6) --------------------------------------------------------------
+
+-- Periodic mark-to-market equity snapshots (UI equity curve; engine writes
+-- one at most every snapshot interval — a few KB per week).
+CREATE TABLE IF NOT EXISTS equity_snapshots (
+    ts     TEXT PRIMARY KEY,                   -- ISO-8601 UTC
+    equity TEXT NOT NULL                       -- decimal string, USDT
+);
 """
 
 # Tables added by each version bump; applying the base _SCHEMA (all CREATE IF
 # NOT EXISTS) migrates any older DB forward, so migrations stay additive-only.
-_ADDITIVE_VERSIONS = {1, 2, 3}
+_ADDITIVE_VERSIONS = {1, 2, 3, 4}
 
 
 def utcnow() -> str:
@@ -157,7 +166,10 @@ class Journal:
     def __init__(self, db_path: Path | str):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.db_path)
+        # check_same_thread=False: the FastAPI event loop (all endpoints) and
+        # the engine share one loop thread in production; sqlite3 is built
+        # serialized, and our single-writer discipline holds regardless.
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=FULL")
@@ -387,6 +399,21 @@ class Journal:
             "SELECT * FROM news_items WHERE seen_at >= ? ORDER BY seen_at", (ts_iso,)
         ).fetchall()
 
+    # -- equity snapshots (S6: UI equity curve) --------------------------------
+
+    def record_equity_snapshot(self, equity: str, ts: str | None = None) -> None:
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO equity_snapshots(ts, equity) VALUES (?,?)",
+                (ts or utcnow(), equity),
+            )
+
+    def equity_series(self, since_iso: str = "") -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT ts, equity FROM equity_snapshots WHERE ts >= ? ORDER BY ts",
+            (since_iso,),
+        ).fetchall()
+
     # -- reads ----------------------------------------------------------------
 
     def get_order(self, client_order_id: str) -> sqlite3.Row | None:
@@ -420,6 +447,73 @@ class Journal:
             " f.price AS price, f.fee AS fee, f.executed_at AS executed_at"
             " FROM fills f JOIN orders o ON o.client_order_id = f.client_order_id"
             " ORDER BY f.executed_at"
+        ).fetchall()
+
+    def trade_history(self, symbol: str | None = None, limit: int = 200) -> list[sqlite3.Row]:
+        """Executed orders newest-first with aggregated fill price/qty/fee and the
+        intent's source — the UI trade timeline's raw material."""
+        where, params = "WHERE f.fill_id IS NOT NULL", []
+        if symbol:
+            where += " AND o.symbol = ?"
+            params.append(symbol)
+        return self._conn.execute(
+            "SELECT o.client_order_id, o.symbol, o.side, o.status, o.created_at,"
+            " i.source AS source,"
+            " SUM(CAST(f.quantity AS REAL)) AS qty,"
+            " SUM(CAST(f.quantity AS REAL) * CAST(f.price AS REAL))"
+            "   / SUM(CAST(f.quantity AS REAL)) AS avg_price,"
+            " SUM(CAST(f.fee AS REAL)) AS fee,"
+            " MAX(f.executed_at) AS executed_at"
+            " FROM orders o"
+            " JOIN intents i ON i.intent_id = o.intent_id"
+            " LEFT JOIN fills f ON f.client_order_id = o.client_order_id"
+            f" {where}"
+            " GROUP BY o.client_order_id"
+            " ORDER BY executed_at DESC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+
+    def pnl_entries_since(self, ts_iso: str = "") -> list[sqlite3.Row]:
+        """Realized P&L ledger rows (one per position-reducing fill), oldest first."""
+        return self._conn.execute(
+            "SELECT ts, symbol, realized_pnl, fee FROM pnl_ledger WHERE ts >= ? ORDER BY ts",
+            (ts_iso,),
+        ).fetchall()
+
+    def fees_total(self) -> Decimal:
+        row = self._conn.execute(
+            "SELECT COALESCE(SUM(CAST(fee AS REAL)), 0) AS total FROM fills"
+            " WHERE fee_asset = 'USDT' OR fee_asset IS NULL"
+        ).fetchone()
+        return Decimal(str(row["total"]))
+
+    def events_of_kind(self, kinds: list[str], limit: int = 100) -> list[sqlite3.Row]:
+        marks = ",".join("?" for _ in kinds)
+        return self._conn.execute(
+            f"SELECT ts, kind, ref_id, payload FROM events WHERE kind IN ({marks})"
+            " ORDER BY event_id DESC LIMIT ?",
+            (*kinds, limit),
+        ).fetchall()
+
+    def news_page(self, limit: int = 50, before_iso: str | None = None) -> list[sqlite3.Row]:
+        if before_iso:
+            return self._conn.execute(
+                "SELECT * FROM news_items WHERE seen_at < ? ORDER BY seen_at DESC LIMIT ?",
+                (before_iso, limit),
+            ).fetchall()
+        return self._conn.execute(
+            "SELECT * FROM news_items ORDER BY seen_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+
+    def news_around(self, ts_iso: str, hours: float = 24.0) -> list[sqlite3.Row]:
+        """Headlines seen within ±hours of *ts_iso* (timeline context, D-23)."""
+        ts = datetime.fromisoformat(ts_iso)
+        lo = (ts - timedelta(hours=hours)).isoformat(timespec="milliseconds")
+        hi = (ts + timedelta(hours=hours)).isoformat(timespec="milliseconds")
+        return self._conn.execute(
+            "SELECT * FROM news_items WHERE seen_at BETWEEN ? AND ?"
+            " ORDER BY seen_at DESC LIMIT 20",
+            (lo, hi),
         ).fetchall()
 
     def realized_pnl_since(self, ts_iso: str) -> Decimal:

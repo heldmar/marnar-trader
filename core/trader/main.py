@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from trader import __version__
 from trader.alerts import TelegramAlerts
+from trader.api import router as api_router
 from trader.config import Secrets, load_config
 from trader.execution import OrderManager
 from trader.gateway import BinanceGateway
@@ -125,6 +126,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="MarNar Trader core", version=__version__, lifespan=lifespan)
+app.include_router(api_router)
 
 
 @app.get("/api/health")
