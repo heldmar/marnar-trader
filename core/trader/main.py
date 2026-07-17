@@ -13,11 +13,12 @@ import os
 from contextlib import asynccontextmanager
 from decimal import Decimal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from trader import __version__
 from trader.alerts import TelegramAlerts
+from trader.api import require_ui_header
 from trader.api import router as api_router
 from trader.config import Secrets, load_config
 from trader.execution import OrderManager
@@ -158,9 +159,10 @@ class KillSwitchRequest(BaseModel):
 
 
 @app.post("/api/kill-switch")
-async def kill_switch(req: KillSwitchRequest) -> dict:
+async def kill_switch(req: KillSwitchRequest, request: Request) -> dict:
     """Manual halt (D-21): always stops trading and cancels pending orders;
     optionally force-flats all positions."""
+    require_ui_header(request)  # QA1-01: close_positions=true force-sells — no CSRF
     action = app.state.risk.halt_manual(req.reason, close_positions=req.close_positions)
     app.state.trading_enabled = False
     if app.state.orders is not None:
@@ -169,8 +171,9 @@ async def kill_switch(req: KillSwitchRequest) -> dict:
 
 
 @app.post("/api/resume")
-async def resume() -> dict:
+async def resume(request: Request) -> dict:
     """Manual reactivation (required after drawdown/manual halts, D-07)."""
+    require_ui_header(request)  # QA1-01: resume undoes a safety halt — no CSRF
     if app.state.reconciliation is not None and not app.state.reconciliation.get("clean"):
         raise HTTPException(409, "cannot resume: last reconciliation was not clean")
     app.state.risk.resume()

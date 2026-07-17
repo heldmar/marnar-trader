@@ -53,7 +53,8 @@ class BinancePublicPrices:
 
         from trader.marketdata import PROD_DATA_URL
 
-        self._client = Spot(base_url=PROD_DATA_URL)
+        # timeout: a hung call must not freeze the shared event loop (QA1-09)
+        self._client = Spot(base_url=PROD_DATA_URL, timeout=10)
 
     def ticker_price(self, symbol: str) -> Decimal:
         return Decimal(self._client.ticker_price(symbol=symbol)["price"])

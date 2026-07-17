@@ -44,7 +44,8 @@ def client(tmp_path, monkeypatch):
     app.state.trading_enabled = True
     app.state.reconciliation = {"clean": True}
     monkeypatch.setattr(trader.main, "CONFIG_PATH", str(tmp_path / "config.yaml"))
-    with TestClient(app) as c:
+    # The UI sends the CSRF header on every request (api.ts); tests mirror that.
+    with TestClient(app, headers={"x-marnar-ui": "1"}) as c:
         yield SimpleNamespace(http=c, journal=journal, app=app, tmp=tmp_path)
     journal.close()
 
@@ -151,6 +152,22 @@ def test_config_put_tightening_risk_needs_no_ack_and_persists(client):
     resp = client.http.put("/api/config", json={"risk": {"max_daily_loss_pct": 1.0}})
     assert resp.json()["clock_reset"] is False
     assert load_config(client.tmp / "config.yaml").risk.max_daily_loss_pct == 1.0
+
+
+def test_config_put_hot_applies_risk_limits(client):
+    """QA1-10: a tightened limit binds immediately, not at next restart."""
+    client.http.put("/api/config", json={"risk": {"max_daily_loss_pct": 1.0}})
+    assert client.app.state.risk._limits.max_daily_loss_pct == 1.0
+
+
+def test_config_put_without_ui_header_is_rejected(client):
+    """QA1-01: state-changing requests need the CSRF header the UI always sends."""
+    with TestClient(client.app) as raw:  # no default headers, like a cross-site form
+        resp = raw.put("/api/config", json={"risk": {"max_daily_loss_pct": 1.0}})
+    assert resp.status_code == 403
+    # nothing was saved or applied
+    assert not (client.tmp / "config.yaml").exists()
+    assert client.app.state.risk._limits.max_daily_loss_pct == 2.0
 
 
 def test_system_reports_freshness(client):

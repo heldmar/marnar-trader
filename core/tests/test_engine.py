@@ -139,3 +139,36 @@ def test_engine_stores_consumed_candles_for_parity(world, tmp_path):
     store = CandleStore(tmp_path / "candles")
     stored = store.read("BTCUSDT", "1h")
     assert stored and stored[-1].open_time == T0 + 10 * H
+
+
+def test_engine_warns_when_blackout_calendar_is_exhausted(world, caplog, tmp_path):
+    """QA1-14: event_blackout=true with no future calendar entries must be loud."""
+    from trader.macro_events import all_event_times_ms
+
+    beyond_calendar = max(all_event_times_ms()) + H
+    with caplog.at_level("WARNING", logger="trader.engine"):
+        PaperEngine(
+            journal=world["journal"], gateway=world["paper"], orders=world["orders"],
+            risk=world["risk"], market=world["market"],
+            store=CandleStore(tmp_path / "candles2"),
+            symbols=["BTCUSDT"], interval="1h", entry_n=3, exit_n=3,
+            stop_loss_pct=5.0, spend_usdt=15.0, event_blackout=True,
+            now_ms=lambda: beyond_calendar,
+        )
+    assert any("no future entries" in r.message for r in caplog.records)
+
+
+def test_engine_no_warning_while_blackout_calendar_has_future_events(world, caplog, tmp_path):
+    from trader.macro_events import all_event_times_ms
+
+    within_calendar = max(all_event_times_ms()) - H
+    with caplog.at_level("WARNING", logger="trader.engine"):
+        PaperEngine(
+            journal=world["journal"], gateway=world["paper"], orders=world["orders"],
+            risk=world["risk"], market=world["market"],
+            store=CandleStore(tmp_path / "candles3"),
+            symbols=["BTCUSDT"], interval="1h", entry_n=3, exit_n=3,
+            stop_loss_pct=5.0, spend_usdt=15.0, event_blackout=True,
+            now_ms=lambda: within_calendar,
+        )
+    assert not any("no future entries" in r.message for r in caplog.records)

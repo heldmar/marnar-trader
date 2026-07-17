@@ -125,7 +125,8 @@ class BinancePublicData:
     """Unauthenticated client against production public endpoints."""
 
     def __init__(self) -> None:
-        self._client = Spot(base_url=PROD_DATA_URL)
+        # timeout: a hung call must not freeze the shared event loop (QA1-09)
+        self._client = Spot(base_url=PROD_DATA_URL, timeout=10)
 
     def klines(
         self, symbol: str, interval: str, *, start_ms: int, limit: int = 1000

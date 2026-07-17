@@ -124,6 +124,14 @@ class PaperEngine:
         self.now_ms = now_ms or (lambda: int(time.time() * 1000))
         self._warmup_candles = max(entry_n, exit_n) + 5
         events = list(all_event_times_ms()) if event_blackout else []
+        if event_blackout and (not events or max(events) < self.now_ms()):
+            # QA1-14: an exhausted calendar means the rule is configured on but
+            # silently inert — that must be loud, not invisible.
+            log.warning(
+                "event blackout is enabled but the macro-events calendar has no "
+                "future entries (latest: %s) — extend trader/macro_events.py",
+                max(events) if events else "none",
+            )
 
         def make_strategy():
             inner = DonchianBreakout(

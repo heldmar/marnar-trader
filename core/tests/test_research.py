@@ -25,8 +25,10 @@ class TestMacroEvents:
         assert expected in fomc_times_ms()
 
     def test_all_within_backtest_horizon(self):
+        # The calendar also feeds the live paper engine (QA1-14), so it now
+        # carries scheduled H2-2026 events beyond the backtest horizon.
         lo = int(datetime(2024, 7, 1, tzinfo=UTC).timestamp() * 1000)
-        hi = int(datetime(2026, 8, 1, tzinfo=UTC).timestamp() * 1000)
+        hi = int(datetime(2027, 1, 1, tzinfo=UTC).timestamp() * 1000)
         assert all(lo <= t <= hi for t in all_event_times_ms())
 
 

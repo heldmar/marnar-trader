@@ -29,6 +29,20 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
+# CSRF defense for state-changing endpoints (QA1-01): cross-site HTML forms
+# cannot set custom headers, and cross-origin fetch with one triggers a CORS
+# preflight this app never grants. The UI sends it on every write request.
+CSRF_HEADER = "x-marnar-ui"
+
+
+def require_ui_header(request: Request) -> None:
+    if CSRF_HEADER not in request.headers:
+        raise HTTPException(
+            403,
+            f"missing {CSRF_HEADER} header (state-changing requests must be "
+            "deliberate; from curl add: -H 'x-marnar-ui: 1')",
+        )
+
 # Strategy-parameter fields whose change invalidates the running paper
 # experiment (D-27: the clock restarts on a material strategy/risk change).
 CLOCK_RESETTING_FIELDS = {"symbols", "interval", "entry_n", "exit_n", "stop_loss_pct", "spend_usdt"}
@@ -197,6 +211,7 @@ class ConfigUpdate(BaseModel):
 
 @router.put("/config")
 async def put_config(request: Request, update: ConfigUpdate) -> dict:
+    require_ui_header(request)
     state = request.app.state
     config: AppConfig = state.config
     try:
@@ -223,6 +238,8 @@ async def put_config(request: Request, update: ConfigUpdate) -> dict:
 
     save_config(new_config, CONFIG_PATH)
     state.config = new_config
+    # Hot-apply: a tightened risk limit binds now, not at next restart (QA1-10).
+    state.risk.set_limits(new_risk)
     state.journal.record_event(
         "CONFIG_CHANGED", "config",
         {"paper": update.paper, "risk": update.risk,

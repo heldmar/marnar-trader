@@ -105,8 +105,10 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  // x-marnar-ui: CSRF guard — the API rejects state-changing requests
+  // without this custom header (cross-site forms cannot set it).
   const resp = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-marnar-ui': '1' },
     ...init,
   })
   if (!resp.ok) {

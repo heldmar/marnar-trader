@@ -61,6 +61,11 @@ class RiskManager:
         self._limits = limits
         self._tz = ZoneInfo(timezone)
 
+    def set_limits(self, limits: RiskLimits) -> None:
+        """Hot-apply a (floor-validated) limits change — a tightened limit must
+        bind immediately, not at the next restart (QA1-10)."""
+        self._limits = limits
+
     # -- state ------------------------------------------------------------------
 
     @property

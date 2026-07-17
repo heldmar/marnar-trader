@@ -85,7 +85,11 @@ class BinanceGateway:
         if not testnet:
             # Live trading is gated behind the mandatory paper period (Phase 4).
             raise NotImplementedError("live mode is not enabled before the paper gate")
-        self._client = Spot(api_key=api_key, api_secret=api_secret, base_url=TESTNET_REST_URL)
+        # timeout: engine + API share one event loop — a hung call must not
+        # freeze the kill switch (QA1-09).
+        self._client = Spot(
+            api_key=api_key, api_secret=api_secret, base_url=TESTNET_REST_URL, timeout=10
+        )
         self._ws_url = TESTNET_WS_URL
 
     # -- REST -----------------------------------------------------------------
