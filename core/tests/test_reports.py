@@ -328,3 +328,59 @@ class TestPartialPeriods:
         sched.generate("weekly", "2026-W29")  # week started Mon 2026-07-13
         body = journal.get_report("weekly", "2026-W29")["body_md"]
         assert "Partial period" in body and "2026-07-16" in body
+
+
+class TestMiddayCheckpoint:
+    """Investor feedback 2026-07-17: per-trade Telegram pings (~30/hour) are
+    replaced with one plain-language midday check-in plus the existing
+    UTC-midnight daily report (already the de-facto "end of day" message)."""
+
+    def paper_start(self, journal, iso: str) -> None:
+        ms = int(datetime.fromisoformat(iso).timestamp() * 1000)
+        journal.set_state("engine:paper_started_at", ms)
+
+    def test_no_checkpoint_before_paper_start(self, journal):
+        alerts = SpyAlerts()
+        now = datetime(2026, 7, 17, 16, 0, tzinfo=UTC)
+        ReportScheduler(journal, alerts, now=lambda: now)._cycle()
+        assert alerts.sent == []
+
+    def test_no_checkpoint_before_the_hour(self, journal):
+        self.paper_start(journal, "2026-07-17T00:00:00+00:00")
+        alerts = SpyAlerts()
+        now = datetime(2026, 7, 17, 14, 59, tzinfo=UTC)
+        ReportScheduler(journal, alerts, now=lambda: now)._cycle()
+        assert alerts.sent == []
+
+    def test_checkpoint_fires_once_after_the_hour(self, journal):
+        self.paper_start(journal, "2026-07-17T00:00:00+00:00")
+        alerts = SpyAlerts()
+        now = datetime(2026, 7, 17, 15, 0, tzinfo=UTC)
+        sched = ReportScheduler(journal, alerts, now=lambda: now)
+        sched._cycle()
+        assert len(alerts.sent) == 1
+        assert alerts.sent[0].startswith("🔆 Midday check-in")
+        sched._cycle()  # a second cycle same day sends nothing more
+        assert len(alerts.sent) == 1
+
+    def test_checkpoint_reports_wins_and_losses_plainly(self, journal, monkeypatch):
+        self.paper_start(journal, "2026-07-17T00:00:00+00:00")
+        record_trade(journal, "BUY", "50000", ts="2026-07-17T09:00:00.000+00:00")
+        # The pnl_ledger stamps write-time; pin it into the period like a
+        # live fill would be (see test_stats_pick_up_trades_pnl_fees_and_reasons).
+        monkeypatch.setattr("trader.journal.utcnow", lambda: "2026-07-17T10:00:00.000+00:00")
+        record_trade(journal, "SELL", "51000", ts="2026-07-17T10:00:00.000+00:00")
+        alerts = SpyAlerts()
+        now = datetime(2026, 7, 17, 15, 0, tzinfo=UTC)
+        ReportScheduler(journal, alerts, now=lambda: now)._cycle()
+        msg = alerts.sent[0]
+        assert "1 win(s), 0 loss(es)" in msg
+        assert "up $" in msg
+
+    def test_checkpoint_skipped_when_telegram_disabled(self, journal):
+        self.paper_start(journal, "2026-07-17T00:00:00+00:00")
+        journal.set_state("reports:telegram_enabled", False)
+        alerts = SpyAlerts()
+        now = datetime(2026, 7, 17, 15, 0, tzinfo=UTC)
+        ReportScheduler(journal, alerts, now=lambda: now)._cycle()
+        assert alerts.sent == []

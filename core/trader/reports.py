@@ -53,6 +53,13 @@ TG_OFFSET_KEY = "reports:tg_update_offset"
 CMD_OFF = "/reports_off"
 CMD_ON = "/reports_on"
 
+# Investor feedback 2026-07-17: per-trade Telegram pings (~30/hour) had no
+# value; replaced with two plain-language check-ins a day. 15:00 UTC is noon
+# in Montevideo (UTC-3, no DST); the existing UTC-midnight daily report
+# already lands ≈21:00 Montevideo and doubles as the "end of day" message.
+CHECKPOINT_HOUR_UTC = 15
+CHECKPOINT_SENT_KEY = "reports:checkpoint_sent_date"
+
 
 def money(v: float, *, signed: bool = False) -> str:
     """USDT rendered as '$' (D-28). signed=True prefixes gains with '+'."""
@@ -182,6 +189,23 @@ class ReportBuilder:
         if s["halts"]:
             lines.append(f"⚠️ {len(s['halts'])} halt/resume event(s) — see the report.")
         lines.append("Full report: web UI → Reports tab.")
+        return "\n".join(lines)
+
+    def render_checkpoint(self, s: dict[str, Any]) -> str:
+        """Midday check-in (D-33/investor feedback 2026-07-17): a very plain,
+        non-financial summary — wins/losses and how the investment is doing,
+        not a list of the operations themselves."""
+        lines = ["🔆 Midday check-in"]
+        closed = s["wins"] + s["losses"]
+        if not closed:
+            lines.append("Today so far: no closed trades yet.")
+        else:
+            lines.append(f"Today so far: {s['wins']} win(s), {s['losses']} loss(es).")
+        direction = "up" if s["pnl_usdt"] >= 0 else "down"
+        lines.append(
+            f"Your investment is {direction} {money(abs(s['pnl_usdt']))} today, "
+            f"now worth {money(s['equity_close'])} in total."
+        )
         return "\n".join(lines)
 
     def render_markdown(self, kind: str, period: str, s: dict[str, Any]) -> str:
@@ -385,9 +409,30 @@ class ReportScheduler:
             )
         return min(len(missing), self.MAX_PER_CYCLE)
 
+    def _maybe_send_checkpoint(self) -> None:
+        """Once per UTC day, after CHECKPOINT_HOUR_UTC: a plain-language
+        midday check-in. Skipped entirely before the paper clock has started
+        and when Telegram delivery is paused."""
+        if not self.telegram_enabled:
+            return
+        start = self._paper_start()
+        if start is None:
+            return
+        now = self.now()
+        if now.hour < CHECKPOINT_HOUR_UTC:
+            return
+        today = now.date().isoformat()
+        if self.journal.get_state(CHECKPOINT_SENT_KEY) == today:
+            return
+        day_start = datetime.combine(now.date(), time.min, tzinfo=UTC)
+        stats = self.builder.build_stats(max(start, day_start), now)
+        self.alerts.send(self.builder.render_checkpoint(stats))
+        self.journal.set_state(CHECKPOINT_SENT_KEY, today)
+
     def _cycle(self) -> None:
         self.process_commands()
         self.catch_up_once()
+        self._maybe_send_checkpoint()
 
     async def run(self, *, every_seconds: float = 300.0) -> None:
         while True:

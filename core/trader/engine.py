@@ -334,9 +334,12 @@ class PaperEngine:
             "tp": str(fill_price * (1 + Decimal(str(tp_pct)) / 100)) if tp_pct else None,
         }
         self.journal.set_state(PROTECT_KEY.format(symbol=symbol), protect)
-        self.alerts.send(
-            f"🟢 BUY {qty} {symbol} @ ~{fill_price} "
-            f"(stop {protect['stop'] or '—'}, target {protect['tp'] or '—'})"
+        # Per-trade Telegram pings were noise (investor feedback 2026-07-17,
+        # ~30/hour): every fill is still journaled and shows up in the
+        # timeline/reports; Telegram now only gets the twice-daily checkpoint.
+        log.info(
+            "BUY %s %s @ ~%s (stop %s, target %s)",
+            qty, symbol, fill_price, protect["stop"] or "—", protect["tp"] or "—",
         )
 
     def _execute_sell(
@@ -369,7 +372,8 @@ class PaperEngine:
                 payload["rule"] = f"protective {reason} level was hit"
             self.journal.record_event("TRADE_REASON", coid, payload)
         fill_price = self._avg_fill_price(coid) or price
-        self.alerts.send(f"🔴 SELL {qty} {symbol} @ ~{fill_price} ({reason})")
+        # See _execute_buy: per-trade Telegram pings removed 2026-07-17.
+        log.info("SELL %s %s @ ~%s (%s)", qty, symbol, fill_price, reason)
 
     def _avg_fill_price(self, coid: str) -> Decimal | None:
         order = self.journal.get_order(coid)

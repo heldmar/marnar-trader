@@ -1,3 +1,4 @@
+import threading
 from decimal import Decimal
 
 from trader.journal import SCHEMA_VERSION, Journal, client_order_id_for, make_intent_id
@@ -202,4 +203,41 @@ def test_orders_created_since_counts_for_rate_cap(tmp_path):
     filled_buy(j, nonce="r2", trade="t-r2")
     assert j.orders_created_since("2000-01-01") == 2
     assert j.orders_created_since("2999-01-01") == 0
+    j.close()
+
+
+def test_get_state_survives_concurrent_writes(tmp_path):
+    """Production bug (2026-07-17): get_state read the shared sqlite3
+    Connection without the journal's lock while set_state wrote under it,
+    and a read racing a write intermittently came back with a NULL/None
+    value column, crashing json.loads with a TypeError. Every read method
+    must take self._lock too."""
+    j = make_journal(tmp_path)
+    j.set_state("k", {"n": 0})
+    errors: list[Exception] = []
+    stop = threading.Event()
+
+    def writer():
+        n = 0
+        while not stop.is_set():
+            n += 1
+            j.set_state("k", {"n": n})
+
+    def reader():
+        while not stop.is_set():
+            try:
+                j.get_state("k")
+            except Exception as exc:  # noqa: BLE001 - captured for the assertion below
+                errors.append(exc)
+
+    threads = [threading.Thread(target=writer)] + [
+        threading.Thread(target=reader) for _ in range(4)
+    ]
+    for t in threads:
+        t.start()
+    stop.wait(1.0)
+    stop.set()
+    for t in threads:
+        t.join()
+    assert errors == []
     j.close()

@@ -260,14 +260,14 @@ class Journal:
 
     def record_order_submitting(self, intent_id: str) -> str:
         """MUST be called (and committed) before the network call to the exchange."""
-        row = self._conn.execute(
-            "SELECT * FROM intents WHERE intent_id=?", (intent_id,)
-        ).fetchone()
-        if row is None:
-            raise KeyError(f"unknown intent {intent_id}")
         coid = client_order_id_for(intent_id)
         now = utcnow()
         with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM intents WHERE intent_id=?", (intent_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown intent {intent_id}")
             self._conn.execute(
                 "INSERT OR IGNORE INTO orders"
                 "(client_order_id, intent_id, symbol, side, order_type, quantity, price,"
@@ -392,7 +392,13 @@ class Journal:
     # -- durable app state (halt state, equity peak, day anchor) ---------------
 
     def get_state(self, key: str, default: Any = None) -> Any:
-        row = self._conn.execute("SELECT value FROM app_state WHERE key=?", (key,)).fetchone()
+        # QA-35: reads must take the lock too — this connection is shared
+        # across threads (poll loop, report scheduler), and an unlocked read
+        # racing a concurrent write can hand back a corrupted cursor result.
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM app_state WHERE key=?", (key,)
+            ).fetchone()
         return default if row is None else json.loads(row["value"])
 
     def set_state(self, key: str, value: Any) -> None:
@@ -419,9 +425,10 @@ class Journal:
             return cur.rowcount > 0
 
     def news_since(self, ts_iso: str) -> list[sqlite3.Row]:
-        return self._conn.execute(
-            "SELECT * FROM news_items WHERE seen_at >= ? ORDER BY seen_at", (ts_iso,)
-        ).fetchall()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM news_items WHERE seen_at >= ? ORDER BY seen_at", (ts_iso,)
+            ).fetchall()
 
     # -- equity snapshots (S6: UI equity curve) --------------------------------
 
@@ -434,17 +441,19 @@ class Journal:
 
     def equity_at(self, ts_iso: str) -> sqlite3.Row | None:
         """Latest snapshot at or before *ts_iso* (S7 report period boundaries)."""
-        return self._conn.execute(
-            "SELECT ts, equity FROM equity_snapshots WHERE ts <= ?"
-            " ORDER BY ts DESC LIMIT 1",
-            (ts_iso,),
-        ).fetchone()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT ts, equity FROM equity_snapshots WHERE ts <= ?"
+                " ORDER BY ts DESC LIMIT 1",
+                (ts_iso,),
+            ).fetchone()
 
     def equity_series(self, since_iso: str = "") -> list[sqlite3.Row]:
-        return self._conn.execute(
-            "SELECT ts, equity FROM equity_snapshots WHERE ts >= ? ORDER BY ts",
-            (since_iso,),
-        ).fetchall()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT ts, equity FROM equity_snapshots WHERE ts >= ? ORDER BY ts",
+                (since_iso,),
+            ).fetchall()
 
     # -- reports (S7: daily/weekly investor reports, UI archive) ---------------
 
@@ -475,9 +484,10 @@ class Journal:
     def reports_list(self, limit: int = 100) -> list[sqlite3.Row]:
         """Newest-first report index (no bodies — the archive list view).
         Sorted by true period start date; a week sorts just above its Monday."""
-        rows = self._conn.execute(
-            "SELECT kind, period, generated_at, summary FROM reports"
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT kind, period, generated_at, summary FROM reports"
+            ).fetchall()
         rows.sort(
             key=lambda r: (self._period_start(r["kind"], r["period"]), r["kind"]),
             reverse=True,
@@ -485,57 +495,65 @@ class Journal:
         return rows[:limit]
 
     def get_report(self, kind: str, period: str) -> sqlite3.Row | None:
-        return self._conn.execute(
-            "SELECT kind, period, generated_at, summary, body_md FROM reports"
-            " WHERE kind=? AND period=?",
-            (kind, period),
-        ).fetchone()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT kind, period, generated_at, summary, body_md FROM reports"
+                " WHERE kind=? AND period=?",
+                (kind, period),
+            ).fetchone()
 
     # -- reads ----------------------------------------------------------------
 
     def get_order(self, client_order_id: str) -> sqlite3.Row | None:
-        return self._conn.execute(
-            "SELECT * FROM orders WHERE client_order_id=?", (client_order_id,)
-        ).fetchone()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM orders WHERE client_order_id=?", (client_order_id,)
+            ).fetchone()
 
     def events_for(self, ref_id: str) -> list[sqlite3.Row]:
-        return self._conn.execute(
-            "SELECT * FROM events WHERE ref_id=? ORDER BY event_id", (ref_id,)
-        ).fetchall()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM events WHERE ref_id=? ORDER BY event_id", (ref_id,)
+            ).fetchall()
 
     def open_orders(self) -> list[sqlite3.Row]:
-        return self._conn.execute(
-            "SELECT * FROM orders WHERE status IN "
-            "('SUBMITTING','SUBMITTED','NEW','PARTIALLY_FILLED')"
-        ).fetchall()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM orders WHERE status IN "
+                "('SUBMITTING','SUBMITTED','NEW','PARTIALLY_FILLED')"
+            ).fetchall()
 
     def positions(self) -> list[sqlite3.Row]:
-        return self._conn.execute("SELECT * FROM positions ORDER BY symbol").fetchall()
+        with self._lock:
+            return self._conn.execute("SELECT * FROM positions ORDER BY symbol").fetchall()
 
     def position_for(self, symbol: str) -> sqlite3.Row | None:
-        return self._conn.execute(
-            "SELECT * FROM positions WHERE symbol=?", (symbol,)
-        ).fetchone()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM positions WHERE symbol=?", (symbol,)
+            ).fetchone()
 
     def fills_with_side(self) -> list[sqlite3.Row]:
         """All fills joined to their order's side (parity report input)."""
-        return self._conn.execute(
-            "SELECT o.side AS side, o.symbol AS symbol, f.quantity AS quantity,"
-            " f.price AS price, f.fee AS fee, f.executed_at AS executed_at"
-            " FROM fills f JOIN orders o ON o.client_order_id = f.client_order_id"
-            " ORDER BY f.executed_at"
-        ).fetchall()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT o.side AS side, o.symbol AS symbol, f.quantity AS quantity,"
+                " f.price AS price, f.fee AS fee, f.executed_at AS executed_at"
+                " FROM fills f JOIN orders o ON o.client_order_id = f.client_order_id"
+                " ORDER BY f.executed_at"
+            ).fetchall()
 
     def fills_between(self, lo_iso: str, hi_iso: str) -> list[sqlite3.Row]:
         """Side-joined fills within [lo, hi) — period-bounded (QA2-06)."""
-        return self._conn.execute(
-            "SELECT o.side AS side, o.symbol AS symbol, f.quantity AS quantity,"
-            " f.price AS price, f.fee AS fee, f.executed_at AS executed_at"
-            " FROM fills f JOIN orders o ON o.client_order_id = f.client_order_id"
-            " WHERE f.executed_at >= ? AND f.executed_at < ?"
-            " ORDER BY f.executed_at",
-            (lo_iso, hi_iso),
-        ).fetchall()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT o.side AS side, o.symbol AS symbol, f.quantity AS quantity,"
+                " f.price AS price, f.fee AS fee, f.executed_at AS executed_at"
+                " FROM fills f JOIN orders o ON o.client_order_id = f.client_order_id"
+                " WHERE f.executed_at >= ? AND f.executed_at < ?"
+                " ORDER BY f.executed_at",
+                (lo_iso, hi_iso),
+            ).fetchall()
 
     def events_of_kind_between(
         self, kinds: list[str], lo_iso: str, hi_iso: str
@@ -543,27 +561,30 @@ class Journal:
         """Events of the given kinds within [lo, hi) — no global row cap, so a
         regenerated old period can never silently lose rows (QA2-06)."""
         marks = ",".join("?" for _ in kinds)
-        return self._conn.execute(
-            f"SELECT ts, kind, ref_id, payload FROM events WHERE kind IN ({marks})"
-            " AND ts >= ? AND ts < ? ORDER BY event_id",
-            (*kinds, lo_iso, hi_iso),
-        ).fetchall()
+        with self._lock:
+            return self._conn.execute(
+                f"SELECT ts, kind, ref_id, payload FROM events WHERE kind IN ({marks})"
+                " AND ts >= ? AND ts < ? ORDER BY event_id",
+                (*kinds, lo_iso, hi_iso),
+            ).fetchall()
 
     def news_count_between(self, lo_iso: str, hi_iso: str) -> int:
-        row = self._conn.execute(
-            "SELECT COUNT(*) AS n FROM news_items WHERE seen_at >= ? AND seen_at < ?",
-            (lo_iso, hi_iso),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM news_items WHERE seen_at >= ? AND seen_at < ?",
+                (lo_iso, hi_iso),
+            ).fetchone()
         return int(row["n"])
 
     def news_between(self, lo_iso: str, hi_iso: str) -> list[sqlite3.Row]:
         """Headlines within [lo, hi) — one batched query for a whole timeline
         page instead of one window query per trade (QA1-04/QA1-20)."""
-        return self._conn.execute(
-            "SELECT * FROM news_items WHERE seen_at >= ? AND seen_at < ?"
-            " ORDER BY seen_at",
-            (lo_iso, hi_iso),
-        ).fetchall()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM news_items WHERE seen_at >= ? AND seen_at < ?"
+                " ORDER BY seen_at",
+                (lo_iso, hi_iso),
+            ).fetchall()
 
     def trade_history(
         self,
@@ -588,76 +609,84 @@ class Journal:
         if before_iso is not None:
             having += (" AND" if having else " HAVING") + " MAX(f.executed_at) < ?"
             hparams.append(before_iso)
-        return self._conn.execute(
-            "SELECT o.client_order_id, o.symbol, o.side, o.status, o.created_at,"
-            " i.source AS source,"
-            " SUM(CAST(f.quantity AS REAL)) AS qty,"
-            " SUM(CAST(f.quantity AS REAL) * CAST(f.price AS REAL))"
-            "   / SUM(CAST(f.quantity AS REAL)) AS avg_price,"
-            " SUM(CAST(f.fee AS REAL)) AS fee,"
-            " MAX(f.executed_at) AS executed_at"
-            " FROM orders o"
-            " JOIN intents i ON i.intent_id = o.intent_id"
-            " LEFT JOIN fills f ON f.client_order_id = o.client_order_id"
-            f" {where}"
-            " GROUP BY o.client_order_id"
-            f"{having}"
-            " ORDER BY executed_at DESC LIMIT ?",
-            (*params, *hparams, limit),
-        ).fetchall()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT o.client_order_id, o.symbol, o.side, o.status, o.created_at,"
+                " i.source AS source,"
+                " SUM(CAST(f.quantity AS REAL)) AS qty,"
+                " SUM(CAST(f.quantity AS REAL) * CAST(f.price AS REAL))"
+                "   / SUM(CAST(f.quantity AS REAL)) AS avg_price,"
+                " SUM(CAST(f.fee AS REAL)) AS fee,"
+                " MAX(f.executed_at) AS executed_at"
+                " FROM orders o"
+                " JOIN intents i ON i.intent_id = o.intent_id"
+                " LEFT JOIN fills f ON f.client_order_id = o.client_order_id"
+                f" {where}"
+                " GROUP BY o.client_order_id"
+                f"{having}"
+                " ORDER BY executed_at DESC LIMIT ?",
+                (*params, *hparams, limit),
+            ).fetchall()
 
     def pnl_entries_since(self, ts_iso: str = "") -> list[sqlite3.Row]:
         """Realized P&L ledger rows (one per position-reducing fill), oldest first."""
-        return self._conn.execute(
-            "SELECT ts, symbol, realized_pnl, fee FROM pnl_ledger WHERE ts >= ? ORDER BY ts",
-            (ts_iso,),
-        ).fetchall()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT ts, symbol, realized_pnl, fee FROM pnl_ledger WHERE ts >= ? ORDER BY ts",
+                (ts_iso,),
+            ).fetchall()
 
     def fees_total(self) -> Decimal:
         # QA1-17: money aggregation in Decimal, not IEEE floats — row counts
         # are small (one per fill) and the schema stores exact decimal strings.
-        rows = self._conn.execute(
-            "SELECT fee FROM fills WHERE fee_asset = 'USDT' OR fee_asset IS NULL"
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT fee FROM fills WHERE fee_asset = 'USDT' OR fee_asset IS NULL"
+            ).fetchall()
         return sum((Decimal(r["fee"]) for r in rows), Decimal("0"))
 
     def events_of_kind(self, kinds: list[str], limit: int = 100) -> list[sqlite3.Row]:
         marks = ",".join("?" for _ in kinds)
-        return self._conn.execute(
-            f"SELECT ts, kind, ref_id, payload FROM events WHERE kind IN ({marks})"
-            " ORDER BY event_id DESC LIMIT ?",
-            (*kinds, limit),
-        ).fetchall()
+        with self._lock:
+            return self._conn.execute(
+                f"SELECT ts, kind, ref_id, payload FROM events WHERE kind IN ({marks})"
+                " ORDER BY event_id DESC LIMIT ?",
+                (*kinds, limit),
+            ).fetchall()
 
     def news_page(self, limit: int = 50, before_iso: str | None = None) -> list[sqlite3.Row]:
-        if before_iso:
+        with self._lock:
+            if before_iso:
+                return self._conn.execute(
+                    "SELECT * FROM news_items WHERE seen_at < ? ORDER BY seen_at DESC LIMIT ?",
+                    (before_iso, limit),
+                ).fetchall()
             return self._conn.execute(
-                "SELECT * FROM news_items WHERE seen_at < ? ORDER BY seen_at DESC LIMIT ?",
-                (before_iso, limit),
+                "SELECT * FROM news_items ORDER BY seen_at DESC LIMIT ?", (limit,)
             ).fetchall()
-        return self._conn.execute(
-            "SELECT * FROM news_items ORDER BY seen_at DESC LIMIT ?", (limit,)
-        ).fetchall()
 
     def news_around(self, ts_iso: str, hours: float = 24.0) -> list[sqlite3.Row]:
         """Headlines seen within ±hours of *ts_iso* (timeline context, D-23)."""
         ts = datetime.fromisoformat(ts_iso)
         lo = (ts - timedelta(hours=hours)).isoformat(timespec="milliseconds")
         hi = (ts + timedelta(hours=hours)).isoformat(timespec="milliseconds")
-        return self._conn.execute(
-            "SELECT * FROM news_items WHERE seen_at BETWEEN ? AND ?"
-            " ORDER BY seen_at DESC LIMIT 20",
-            (lo, hi),
-        ).fetchall()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM news_items WHERE seen_at BETWEEN ? AND ?"
+                " ORDER BY seen_at DESC LIMIT 20",
+                (lo, hi),
+            ).fetchall()
 
     def realized_pnl_since(self, ts_iso: str) -> Decimal:
-        rows = self._conn.execute(
-            "SELECT realized_pnl FROM pnl_ledger WHERE ts >= ?", (ts_iso,)
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT realized_pnl FROM pnl_ledger WHERE ts >= ?", (ts_iso,)
+            ).fetchall()
         return sum((Decimal(r["realized_pnl"]) for r in rows), Decimal("0"))
 
     def orders_created_since(self, ts_iso: str) -> int:
-        row = self._conn.execute(
-            "SELECT COUNT(*) AS n FROM orders WHERE created_at >= ?", (ts_iso,)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM orders WHERE created_at >= ?", (ts_iso,)
+            ).fetchone()
         return int(row["n"])
