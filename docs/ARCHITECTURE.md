@@ -5,6 +5,8 @@
 **Date:** 2026-07-13
 **Constraints honored:** RPi 4B arm64 host, /mnt/storage USB data, no UPS (hard-crash safe), Portainer/NPM deployment, secrets never in Git (D-04, D-13, D-15, D-16).
 
+**D-24 as-built diagram:** [`docs/img/architecture.svg`](img/architecture.svg) is the rendered, investor-facing solution/data-architecture image produced at S8 close — it reflects the system as actually shipped (news ingestion, report scheduler, Telegram switch, etc.), which this narrative doc predates. Where the two disagree, the diagram and the code are authoritative; this doc remains the original design rationale.
+
 ## 1. Stack
 
 | Layer | Choice | Why |

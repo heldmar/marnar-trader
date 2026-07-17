@@ -6,7 +6,7 @@ strategy, and reports back in plain language — what it did, why it did it, and
 what it cost. No cloud subscription, no black box, no custody of your keys by
 anyone but you.
 
-![Dashboard — plain-language P&L, equity curve, holdings](docs/img/s6-home.png)
+![Dashboard — plain-language P&L, equity curve, holdings](docs/img/s8-home.png)
 
 ## Why it's different
 
@@ -36,7 +36,7 @@ Most trading bots optimize for excitement. MarNar Trader optimizes for
   "You made money today", "why: the price broke above its 15-day high",
   "safety exit at $x". Depth is one tap away, jargon is not required.
 
-![Activity — every trade with the rule that fired, news as labeled context](docs/img/s6-activity.png)
+![Activity — every trade with the rule that fired, news as labeled context](docs/img/s8-activity.png)
 
 ## What's inside
 
@@ -51,7 +51,11 @@ Most trading bots optimize for excitement. MarNar Trader optimizes for
 It runs anywhere Docker runs — a Raspberry Pi is enough (the reference
 deployment uses one). Two containers, ~600 MB of RAM, no external database.
 
-![Settings — safety limits with enforced floors, health strip](docs/img/s6-settings.png)
+![Architecture — solution and data flow, as built](docs/img/architecture.svg)
+
+![Reports — daily and weekly, plain language, quiet days included](docs/img/s8-reports.png)
+
+![Settings — safety limits with enforced floors, health strip](docs/img/s8-settings.png)
 
 ## Get started
 
