@@ -24,6 +24,26 @@ jobs:
       - name: Unit tests (risk module requires 100% branch coverage, arch §6)
         run: pytest -m "not integration" --cov=trader.risk --cov-branch --cov-fail-under=100
 
+  ui:
+    # QA1-21: the UI must not be discovered broken at deploy time on the Pi.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Lint (oxlint)
+        run: npm run lint
+      - name: Typecheck + build (tsc -b && vite build)
+        run: npm run build
+
   # NOTE (2026-07-13): no testnet-integration job on GitHub-hosted runners.
   # Binance geo-blocks US IPs (HTTP 451) including the testnet, and GitHub's
   # runners are US-based. Integration tests (`pytest -m integration`, secrets
@@ -42,5 +62,11 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: core
+          platforms: linux/arm64
+          push: false
+      - name: Build ui image (linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: ui
           platforms: linux/arm64
           push: false
