@@ -43,6 +43,7 @@ export function Settings({
   const [config, setConfig] = useState<ConfigView | null>(null)
   const [risk, setRisk] = useState<Record<string, number>>({})
   const [paper, setPaper] = useState<Record<string, number>>({})
+  const [tgReports, setTgReports] = useState<boolean | null>(null)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<{ kind: 'ok' | 'bad' | 'warn'; text: string } | null>(null)
   const [confirmReset, setConfirmReset] = useState<string | null>(null)
@@ -55,7 +56,20 @@ export function Settings({
     })
   useEffect(() => {
     load().catch(() => setMessage({ kind: 'bad', text: 'Could not load settings.' }))
+    api.reportSettings().then((s) => setTgReports(s.telegram_enabled)).catch(() => {})
   }, [])
+
+  const toggleTgReports = async () => {
+    if (tgReports === null) return
+    const next = !tgReports
+    setTgReports(next) // optimistic; revert on failure
+    try {
+      await api.putReportSettings(next)
+    } catch (e) {
+      setTgReports(!next)
+      setMessage({ kind: 'bad', text: e instanceof Error ? e.message : String(e) })
+    }
+  }
 
   if (!config) return <div className="loading">Loading settings…</div>
 
@@ -174,6 +188,32 @@ export function Settings({
             managed by the screener, not edited here.
           </p>
         </div>
+      </div>
+
+      <div className="card">
+        <h2>Telegram reports</h2>
+        <p className="muted small">
+          A plain-language report is written after every day and every week. It is always
+          saved to the Reports tab; this only controls whether a copy is sent to Telegram.
+          You can also pause/resume by messaging the bot <code>/reports_off</code> or{' '}
+          <code>/reports_on</code>.
+        </p>
+        <label className="field" style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <input
+            type="checkbox"
+            checked={tgReports ?? true}
+            disabled={tgReports === null}
+            onChange={toggleTgReports}
+          />
+          <span className="name" style={{ margin: 0 }}>
+            Send daily and weekly reports to Telegram
+          </span>
+        </label>
+        {tgReports === false && (
+          <p className="muted small">
+            Paused — reports keep being written to the archive, nothing is lost.
+          </p>
+        )}
       </div>
 
       {message && <div className={`notice ${message.kind}`}>{message.text}</div>}

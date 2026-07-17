@@ -23,7 +23,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -130,11 +130,25 @@ CREATE TABLE IF NOT EXISTS equity_snapshots (
     ts     TEXT PRIMARY KEY,                   -- ISO-8601 UTC
     equity TEXT NOT NULL                       -- decimal string, USDT
 );
+
+-- v5 (Sprint 7) --------------------------------------------------------------
+
+-- Generated investor reports (S7): daily and weekly, rendered once and
+-- archived here for the UI; the compact Telegram copy is derived from the
+-- same summary at send time. Idempotency key = (kind, period).
+CREATE TABLE IF NOT EXISTS reports (
+    kind         TEXT NOT NULL CHECK (kind IN ('daily','weekly')),
+    period       TEXT NOT NULL,                -- '2026-07-16' or '2026-W29'
+    generated_at TEXT NOT NULL,                -- ISO-8601 UTC
+    summary      TEXT NOT NULL,                -- JSON (P&L, equity, counts...)
+    body_md      TEXT NOT NULL,                -- full markdown report
+    PRIMARY KEY (kind, period)
+);
 """
 
 # Tables added by each version bump; applying the base _SCHEMA (all CREATE IF
 # NOT EXISTS) migrates any older DB forward, so migrations stay additive-only.
-_ADDITIVE_VERSIONS = {1, 2, 3, 4}
+_ADDITIVE_VERSIONS = {1, 2, 3, 4, 5}
 
 
 def utcnow() -> str:
@@ -408,11 +422,50 @@ class Journal:
                 (ts or utcnow(), equity),
             )
 
+    def equity_at(self, ts_iso: str) -> sqlite3.Row | None:
+        """Latest snapshot at or before *ts_iso* (S7 report period boundaries)."""
+        return self._conn.execute(
+            "SELECT ts, equity FROM equity_snapshots WHERE ts <= ?"
+            " ORDER BY ts DESC LIMIT 1",
+            (ts_iso,),
+        ).fetchone()
+
     def equity_series(self, since_iso: str = "") -> list[sqlite3.Row]:
         return self._conn.execute(
             "SELECT ts, equity FROM equity_snapshots WHERE ts >= ? ORDER BY ts",
             (since_iso,),
         ).fetchall()
+
+    # -- reports (S7: daily/weekly investor reports, UI archive) ---------------
+
+    def save_report(
+        self, *, kind: str, period: str, summary: dict[str, Any], body_md: str
+    ) -> None:
+        """Store (or regenerate) a report. (kind, period) is the idempotency key."""
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO reports(kind, period, generated_at, summary, body_md)"
+                " VALUES (?,?,?,?,?)"
+                " ON CONFLICT(kind, period) DO UPDATE SET"
+                " generated_at=excluded.generated_at, summary=excluded.summary,"
+                " body_md=excluded.body_md",
+                (kind, period, utcnow(), json.dumps(summary, default=str), body_md),
+            )
+
+    def reports_list(self, limit: int = 100) -> list[sqlite3.Row]:
+        """Newest-first report index (no bodies — the archive list view)."""
+        return self._conn.execute(
+            "SELECT kind, period, generated_at, summary FROM reports"
+            " ORDER BY period DESC, kind LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    def get_report(self, kind: str, period: str) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT kind, period, generated_at, summary, body_md FROM reports"
+            " WHERE kind=? AND period=?",
+            (kind, period),
+        ).fetchone()
 
     # -- reads ----------------------------------------------------------------
 

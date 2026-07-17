@@ -170,6 +170,32 @@ def test_config_put_without_ui_header_is_rejected(client):
     assert client.app.state.risk._limits.max_daily_loss_pct == 2.0
 
 
+def test_reports_archive_list_and_detail(client):
+    client.journal.save_report(
+        kind="daily", period="2026-07-16",
+        summary={"pnl_usdt": 2.5, "quiet": False}, body_md="# Daily report",
+    )
+    (row,) = client.http.get("/api/reports").json()
+    assert row["kind"] == "daily" and row["summary"]["pnl_usdt"] == 2.5
+    assert "body_md" not in row  # list stays light; the body is in the detail
+    detail = client.http.get("/api/reports/daily/2026-07-16").json()
+    assert detail["body_md"] == "# Daily report"
+    assert client.http.get("/api/reports/daily/2099-01-01").status_code == 404
+
+
+def test_report_settings_toggle_and_csrf(client):
+    assert client.http.get("/api/reports/settings").json() == {"telegram_enabled": True}
+    resp = client.http.put("/api/reports/settings", json={"telegram_enabled": False})
+    assert resp.json() == {"telegram_enabled": False}
+    assert client.journal.get_state("reports:telegram_enabled") is False
+    # state-changing → CSRF header required
+    with TestClient(client.app) as raw:
+        assert raw.put(
+            "/api/reports/settings", json={"telegram_enabled": True}
+        ).status_code == 403
+    assert client.journal.get_state("reports:telegram_enabled") is False
+
+
 def test_system_reports_freshness(client):
     client.journal.set_state("engine:last_candle:BTCUSDT", 1_784_160_000_000)
     client.journal.record_news_item(

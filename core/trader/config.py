@@ -89,6 +89,7 @@ class PaperConfig(BaseModel):
     poll_seconds: float = 60.0
     event_blackout: bool = True  # D-23 rule, kept as cheap insurance (D-26)
     news_ingest_seconds: float = 900.0  # D-23a headline cycle
+    report_check_seconds: float = 300.0  # S7 daily/weekly report catch-up cycle
 
 
 class AppConfig(BaseModel):

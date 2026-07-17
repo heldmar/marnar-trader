@@ -96,6 +96,33 @@ export interface SystemInfo {
   orders_last_24h: number
 }
 
+// S7 report archive (D-28/D-29): summary mirrors trader/reports.py's stats.
+export interface ReportSummary {
+  equity_open: number
+  equity_close: number
+  pnl_usdt: number
+  pnl_pct: number
+  realized_pnl_usdt: number
+  trade_count: number
+  wins: number
+  losses: number
+  fees_usdt: number
+  news_count: number
+  quiet: boolean
+  halt_count: number
+}
+
+export interface ReportIndexItem {
+  kind: 'daily' | 'weekly'
+  period: string
+  generated_at: string
+  summary: ReportSummary
+}
+
+export interface ReportDetail extends ReportIndexItem {
+  body_md: string
+}
+
 export class ApiError extends Error {
   status: number
   constructor(status: number, message: string) {
@@ -130,6 +157,15 @@ export const api = {
   timeline: (symbol?: string) =>
     request<TimelineItem[]>(`/api/timeline${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`),
   config: () => request<ConfigView>('/api/config'),
+  reports: () => request<ReportIndexItem[]>('/api/reports'),
+  reportSettings: () => request<{ telegram_enabled: boolean }>('/api/reports/settings'),
+  putReportSettings: (telegramEnabled: boolean) =>
+    request<{ telegram_enabled: boolean }>('/api/reports/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ telegram_enabled: telegramEnabled }),
+    }),
+  report: (kind: string, period: string) =>
+    request<ReportDetail>(`/api/reports/${encodeURIComponent(kind)}/${encodeURIComponent(period)}`),
   system: () => request<SystemInfo>('/api/system'),
   putConfig: (body: {
     paper?: Record<string, unknown>

@@ -7,14 +7,15 @@ import { api, type Overview, type Position, type SystemInfo, type TimelineItem }
 import { KillSwitchButton } from './components/KillSwitch'
 import { Dashboard } from './screens/Dashboard'
 import { Activity } from './screens/Activity'
+import { Reports } from './screens/Reports'
 import { Settings } from './screens/Settings'
 
-type Tab = 'home' | 'activity' | 'settings'
+type Tab = 'home' | 'activity' | 'reports' | 'settings'
 const REFRESH_MS = 30_000
 
 function tabFromUrl(): Tab {
   const t = new URLSearchParams(window.location.search).get('tab')
-  return t === 'activity' || t === 'settings' ? t : 'home'
+  return t === 'activity' || t === 'reports' || t === 'settings' ? t : 'home'
 }
 
 export default function App() {
@@ -62,6 +63,9 @@ export default function App() {
           <button className={tab === 'activity' ? 'active' : ''} onClick={() => setTab('activity')}>
             Activity
           </button>
+          <button className={tab === 'reports' ? 'active' : ''} onClick={() => setTab('reports')}>
+            Reports
+          </button>
           <button className={tab === 'settings' ? 'active' : ''} onClick={() => setTab('settings')}>
             Settings
           </button>
@@ -89,6 +93,8 @@ export default function App() {
         <Dashboard overview={overview} positions={positions} onChanged={refresh} />
       ) : tab === 'activity' ? (
         <Activity items={timeline} positions={positions} />
+      ) : tab === 'reports' ? (
+        <Reports />
       ) : (
         <Settings overview={overview} system={system} onChanged={refresh} />
       )}

@@ -35,6 +35,28 @@ Environment variables (Portainer stack env vars in production — never in files
 - Parity report (Q13 evidence, run any time):
   `python -m trader.parity` → `/data/reports/parity-YYYY-MM-DD.md`.
 
+## Weekly ops checklist (Q13 / D-27 gate evidence)
+Run once a week during the paper period; all three must pass:
+1. **Parity:** `docker exec marnar-trader-core python -m trader.parity` —
+   report lands in `/data/reports/`, verdict must be PASS (D-27 bands:
+   ±2pp return, ±30% trades, ±10% fees).
+2. **Health:** `GET /api/health` → `status: ok`, reconciliation clean,
+   risk state RUNNING (or an explained halt).
+3. **Telegram alive:** the daily report arrived this week (or the delivery
+   switch is deliberately off — see below).
+
+## Daily & weekly reports (S7, D-28/D-29)
+- Written automatically after every UTC day and every ISO week (Mondays) by a
+  scheduler task inside the core service; archived in the journal (`reports`
+  table), browsable in the UI's **Reports** tab, and pushed to Telegram while
+  fresh (<24 h after the period closed). Catch-up doubles as backfill: gaps
+  after downtime heal on their own, archive-only (no stale pings).
+- **Pausing the Telegram copy:** UI → Settings → "Telegram reports" toggle,
+  or message the bot `/reports_off` / `/reports_on` (commands are accepted
+  only from the configured `TELEGRAM_CHAT_ID`; picked up within one scheduler
+  cycle, ~5 min). Reports are always archived regardless of the switch; the
+  setting survives restarts (journal `app_state`).
+
 ## Restart / crash behavior
 Same discipline as testnet mode: journal-before-call, deterministic client
 order ids, reconcile-before-trade. On boot the engine rebuilds strategy state

@@ -24,6 +24,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
 from trader.config import RISK_FLOORS, AppConfig, PaperConfig, RiskLimits, save_config
+from trader.reports import DELIVERY_KEY
 
 log = logging.getLogger(__name__)
 
@@ -185,6 +186,58 @@ async def timeline(request: Request, symbol: str | None = None, limit: int = 100
 @router.get("/news")
 async def news(request: Request, limit: int = 50, before: str | None = None) -> list[dict]:
     return [dict(n) for n in request.app.state.journal.news_page(limit=limit, before_iso=before)]
+
+
+@router.get("/reports")
+async def reports_index(request: Request, limit: int = 100) -> list[dict]:
+    """S7 report archive index, newest first (no bodies — see the detail route)."""
+    return [
+        {
+            "kind": r["kind"],
+            "period": r["period"],
+            "generated_at": r["generated_at"],
+            "summary": json.loads(r["summary"]),
+        }
+        for r in request.app.state.journal.reports_list(limit=limit)
+    ]
+
+
+class ReportSettings(BaseModel):
+    telegram_enabled: bool
+
+
+@router.get("/reports/settings")
+async def report_settings(request: Request) -> dict:
+    """Delivery switch for the Telegram copy of daily/weekly reports. Reports
+    are always archived regardless; this only controls the push."""
+    journal = request.app.state.journal
+    return {"telegram_enabled": bool(journal.get_state(DELIVERY_KEY, True))}
+
+
+@router.put("/reports/settings")
+async def put_report_settings(request: Request, settings: ReportSettings) -> dict:
+    require_ui_header(request)
+    journal = request.app.state.journal
+    journal.set_state(DELIVERY_KEY, settings.telegram_enabled)
+    journal.record_event(
+        "REPORT_DELIVERY_CHANGED", "reports",
+        {"telegram_enabled": settings.telegram_enabled, "via": "ui"},
+    )
+    return {"telegram_enabled": settings.telegram_enabled}
+
+
+@router.get("/reports/{kind}/{period}")
+async def report_detail(request: Request, kind: str, period: str) -> dict:
+    row = request.app.state.journal.get_report(kind, period)
+    if row is None:
+        raise HTTPException(404, f"no {kind} report for {period}")
+    return {
+        "kind": row["kind"],
+        "period": row["period"],
+        "generated_at": row["generated_at"],
+        "summary": json.loads(row["summary"]),
+        "body_md": row["body_md"],
+    }
 
 
 @router.get("/config")

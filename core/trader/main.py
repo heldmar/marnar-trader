@@ -52,6 +52,7 @@ async def lifespan(app: FastAPI):
         from trader.marketdata import BinancePublicData, CandleStore
         from trader.news import NewsIngestor
         from trader.paper import BinancePublicPrices, PaperGateway
+        from trader.reports import ReportScheduler
 
         app.state.gateway = PaperGateway(
             config.data_dir / "paper-account.json",
@@ -95,6 +96,18 @@ async def lifespan(app: FastAPI):
                         every_seconds=config.paper.news_ingest_seconds
                     ),
                     name="news-ingest",
+                )
+            )
+            # S7: daily/weekly investor reports. Same isolation contract as
+            # news — its failures never touch the trading loop. Catch-up
+            # doubles as backfill, so the archive is complete from paper start.
+            tasks.append(
+                asyncio.create_task(
+                    ReportScheduler(
+                        app.state.journal, alerts,
+                        initial_equity=config.paper.initial_usdt,
+                    ).run(every_seconds=config.paper.report_check_seconds),
+                    name="report-scheduler",
                 )
             )
         else:

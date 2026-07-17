@@ -41,6 +41,29 @@ class TelegramAlerts:
     def enabled(self) -> bool:
         return bool(self._token and self._chat_id)
 
+    @property
+    def chat_id(self) -> str:
+        return self._chat_id
+
+    def get_updates(self, offset: int = 0) -> list[dict]:
+        """Fetch pending bot updates (for the S7 report commands). Best-effort:
+        any failure returns [] — command handling must never break a cycle."""
+        if not self.enabled:
+            return []
+        try:
+            resp = requests.get(
+                f"{_API}/bot{self._token}/getUpdates",
+                params={"offset": offset, "timeout": 0},
+                timeout=self._timeout,
+            )
+            if resp.status_code != 200:
+                log.warning("telegram getUpdates failed: %s", resp.status_code)
+                return []
+            return resp.json().get("result", [])
+        except Exception as exc:
+            log.warning("telegram getUpdates error: %s", exc)
+            return []
+
     def send(self, text: str) -> bool:
         """Deliver *text* (best-effort). Returns True on confirmed delivery."""
         if not self.enabled:

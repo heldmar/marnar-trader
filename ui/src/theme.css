@@ -204,3 +204,26 @@ input:focus { outline: 2px solid var(--sage); border-color: var(--sage); }
 .healthrow { display: flex; flex-wrap: wrap; gap: 10px; }
 
 .loading { color: var(--ink-soft); text-align: center; padding: 40px; }
+
+/* ---- reports archive (S7) ------------------------------------------------ */
+
+.report-list { display: flex; flex-direction: column; }
+.report-row {
+  display: flex; align-items: center; gap: 12px; width: 100%;
+  background: none; border: none; border-top: 1px solid var(--line);
+  font: inherit; text-align: left; padding: 11px 4px; cursor: pointer;
+}
+.report-row:hover { background: var(--sage-bg, rgba(0, 0, 0, 0.03)); }
+.report-row .report-when { font-weight: 650; min-width: 120px; }
+.report-row .report-pnl { margin-left: auto; font-variant-numeric: tabular-nums; }
+.pill.daily { background: var(--sage-bg, #eef3ee); color: var(--sage-deep); }
+.pill.weekly { background: var(--amber-bg); color: var(--amber); }
+
+.linklike {
+  background: none; border: none; font: inherit; color: var(--sage-deep);
+  cursor: pointer; padding: 0; font-weight: 650;
+}
+.report-body h2 { margin: 12px 0 6px; }
+.report-body h3 { margin: 14px 0 4px; }
+.report-body p { margin: 6px 0; }
+.report-body ul { margin: 6px 0 6px 20px; }
