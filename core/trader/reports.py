@@ -440,6 +440,9 @@ class ReportScheduler:
                 # QA2-03: Telegram HTTP + journal scans belong in a worker
                 # thread — the event loop (API, kill switch) must stay free.
                 await asyncio.to_thread(self._cycle)
-            except Exception as exc:
-                log.warning("report cycle failed (retrying next cycle): %s", exc)
+            except Exception:
+                # QA-36: bare `exc` gave no traceback, so a real (if rare and
+                # self-healing) production error was undiagnosable. Full stack
+                # next time this fires.
+                log.warning("report cycle failed (retrying next cycle)", exc_info=True)
             await asyncio.sleep(every_seconds)
