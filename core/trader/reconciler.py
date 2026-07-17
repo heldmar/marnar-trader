@@ -23,11 +23,25 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from trader.gateway import ExchangeGateway
-from trader.journal import Journal
+from trader.journal import Journal, utcnow
 
 log = logging.getLogger(__name__)
+
+
+def _ms_to_iso(ms: object) -> str:
+    """Binance trade `time` (epoch ms) → the journal's ISO-8601 format.
+    QA1-13: everything else stores ISO; an epoch string here broke the
+    timeline's string ordering and its news-window parsing."""
+    try:
+        return datetime.fromtimestamp(int(ms) / 1000, tz=UTC).isoformat(
+            timespec="milliseconds"
+        )
+    except (TypeError, ValueError):
+        return utcnow()
+
 
 OURS_PREFIX = "mnt-"
 # Terminal states an exchange lookup can report.
@@ -121,7 +135,7 @@ class Reconciler:
                 price=trade["price"],
                 fee=trade.get("commission", "0"),
                 fee_asset=trade.get("commissionAsset"),
-                executed_at=str(trade.get("time", "")),
+                executed_at=_ms_to_iso(trade.get("time")),
             )
 
     def _handle_exchange_open_orders(self, report: ReconciliationReport) -> None:

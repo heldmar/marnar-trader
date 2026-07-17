@@ -32,6 +32,9 @@ RISK_FLOORS = {
 
 
 class RiskLimits(BaseModel):
+    # QA1-08: unknown keys are typos, not silent no-ops.
+    model_config = {"extra": "forbid"}
+
     max_daily_loss_pct: float = RISK_FLOORS["max_daily_loss_pct"]
     max_drawdown_pct: float = RISK_FLOORS["max_drawdown_pct"]
     max_position_pct_per_coin: float = RISK_FLOORS["max_position_pct_per_coin"]
@@ -74,6 +77,10 @@ class PaperConfig(BaseModel):
     Donchian 15/15 with a 3% stop on 1d candles — chosen by every fold,
     validated out-of-sample against the D-26 baseline."""
 
+    # QA1-08: reject typo'd keys instead of silently ignoring them, and bound
+    # the operational knobs (poll_seconds=0.001 would hammer Binance from the Pi).
+    model_config = {"extra": "forbid"}
+
     symbols: list[str] = [  # D-09 screener universe (screener-2026-07-14.md)
         "BTCUSDT", "ETHUSDT", "SXTUSDT", "SOLUSDT", "ZECUSDT", "XRPUSDT",
         "BNBUSDT", "NEARUSDT", "TRXUSDT", "WLDUSDT", "DEXEUSDT", "TAOUSDT",
@@ -86,10 +93,10 @@ class PaperConfig(BaseModel):
     stop_loss_pct: float = 3.0
     spend_usdt: float = 15.0  # D-08: 10% of pilot capital per position
     initial_usdt: float = 150.0  # D-05
-    poll_seconds: float = 60.0
+    poll_seconds: float = Field(default=60.0, ge=5.0, le=3600.0)
     event_blackout: bool = True  # D-23 rule, kept as cheap insurance (D-26)
-    news_ingest_seconds: float = 900.0  # D-23a headline cycle
-    report_check_seconds: float = 300.0  # S7 daily/weekly report catch-up cycle
+    news_ingest_seconds: float = Field(default=900.0, ge=60.0)  # D-23a headline cycle
+    report_check_seconds: float = Field(default=300.0, ge=30.0)  # S7 report catch-up cycle
 
 
 class AppConfig(BaseModel):
@@ -152,5 +159,7 @@ def load_config(path: Path | str | None = None) -> AppConfig:
 
 
 def save_config(config: AppConfig, path: Path | str) -> None:
+    from trader.fsutil import atomic_write_text  # QA1-11: power-cut-safe write
+
     data = config.model_dump(mode="json")
-    Path(path).write_text(yaml.safe_dump(data, sort_keys=False))
+    atomic_write_text(path, yaml.safe_dump(data, sort_keys=False))

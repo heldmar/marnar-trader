@@ -54,23 +54,52 @@ async def lifespan(app: FastAPI):
         from trader.paper import BinancePublicPrices, PaperGateway
         from trader.reports import ReportScheduler
 
-        app.state.gateway = PaperGateway(
-            config.data_dir / "paper-account.json",
-            BinancePublicPrices(),
-            initial_usdt=Decimal(str(config.paper.initial_usdt)),
-            fee_rate=Decimal(str(config.fee_rate_per_side)),
-            slippage_bps=Decimal(str(config.backtest.slippage_bps)),
-        )
-        app.state.orders = OrderManager(app.state.journal, app.state.gateway, app.state.risk)
+        alerts = TelegramAlerts.from_env()
         try:
-            report = Reconciler(app.state.journal, app.state.gateway).run()
-            app.state.reconciliation = report.summary()
-            app.state.trading_enabled = report.clean
+            app.state.gateway = PaperGateway(
+                config.data_dir / "paper-account.json",
+                BinancePublicPrices(),
+                initial_usdt=Decimal(str(config.paper.initial_usdt)),
+                fee_rate=Decimal(str(config.fee_rate_per_side)),
+                slippage_bps=Decimal(str(config.backtest.slippage_bps)),
+            )
         except Exception as exc:
-            log.error("reconciliation failed hard: %s", exc)
+            # QA1-11: a corrupt account file must not crash-loop the container —
+            # come up locked, with the API alive and the operator told why.
+            log.error("paper gateway unavailable: %s", exc)
             app.state.reconciliation = {"clean": False, "errors": [str(exc)]}
+        if app.state.gateway is not None:
+            app.state.orders = OrderManager(
+                app.state.journal, app.state.gateway, app.state.risk
+            )
+            try:
+                report = Reconciler(app.state.journal, app.state.gateway).run()
+                app.state.reconciliation = report.summary()
+                app.state.trading_enabled = report.clean
+            except Exception as exc:
+                log.error("reconciliation failed hard: %s", exc)
+                app.state.reconciliation = {"clean": False, "errors": [str(exc)]}
+        # QA2-01: news + reports run regardless of the trading lock — they read
+        # only the journal. "Silence always means something is wrong" must hold
+        # *especially* on a dirty boot, so a locked day still gets its report.
+        tasks.append(
+            asyncio.create_task(
+                NewsIngestor(app.state.journal).run(
+                    every_seconds=config.paper.news_ingest_seconds
+                ),
+                name="news-ingest",
+            )
+        )
+        tasks.append(
+            asyncio.create_task(
+                ReportScheduler(
+                    app.state.journal, alerts,
+                    initial_equity=config.paper.initial_usdt,
+                ).run(every_seconds=config.paper.report_check_seconds),
+                name="report-scheduler",
+            )
+        )
         if app.state.trading_enabled:
-            alerts = TelegramAlerts.from_env()
             engine = PaperEngine(
                 journal=app.state.journal,
                 gateway=app.state.gateway,
@@ -87,31 +116,18 @@ async def lifespan(app: FastAPI):
                 poll_seconds=config.paper.poll_seconds,
                 alerts=alerts,
                 event_blackout=config.paper.event_blackout,
+                fee_rate=config.fee_rate_per_side,
             )
             app.state.engine = engine
             tasks.append(asyncio.create_task(engine.run(), name="paper-engine"))
-            tasks.append(
-                asyncio.create_task(
-                    NewsIngestor(app.state.journal).run(
-                        every_seconds=config.paper.news_ingest_seconds
-                    ),
-                    name="news-ingest",
-                )
-            )
-            # S7: daily/weekly investor reports. Same isolation contract as
-            # news — its failures never touch the trading loop. Catch-up
-            # doubles as backfill, so the archive is complete from paper start.
-            tasks.append(
-                asyncio.create_task(
-                    ReportScheduler(
-                        app.state.journal, alerts,
-                        initial_equity=config.paper.initial_usdt,
-                    ).run(every_seconds=config.paper.report_check_seconds),
-                    name="report-scheduler",
-                )
-            )
         else:
             log.error("paper engine NOT started: reconciliation was not clean")
+            # QA2-01: the locked state must be loud, not just a log line.
+            alerts.send(
+                "🚨 MarNar core is UP but trading is LOCKED — reconciliation "
+                f"was not clean: {app.state.reconciliation}. Reports continue; "
+                "resolve and restart to trade."
+            )
     else:
         secrets = Secrets.from_env(config.mode)
         if secrets.binance_api_key:

@@ -76,7 +76,9 @@ def test_round_trip_charges_both_sides_and_realizes_pnl():
     assert [t.side for t in result.trades] == ["BUY", "SELL"]
     buy, sell = result.trades
     assert sell.reason == "strategy"
-    expected_pnl = (120 - 100) * buy.qty - 120 * buy.qty * 0.001
+    # QA1-16 (D-34): the entry fee is in the cost basis, so realized P&L nets
+    # BOTH fees — a round trip equals its true cash flow.
+    expected_pnl = (120 - 100) * buy.qty - 120 * buy.qty * 0.001 - buy.fee
     assert sell.realized_pnl == pytest.approx(expected_pnl)
     assert result.round_trips == 1
     assert result.win_rate_pct == 100.0

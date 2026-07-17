@@ -231,3 +231,22 @@ def test_runaway_strategy_is_stopped_on_every_front(journal, risk, limits):
     risk.halt_manual("kill", close_positions=True)
     assert not risk.evaluate_intent(symbol="AUSDT", side="SELL",
                                     notional=Decimal("1"), equity=EQUITY).approved
+
+
+# -- QA1-18: zero-equity must halt, never divide by zero ------------------------------
+
+
+def test_zero_equity_halts_instead_of_dividing(risk):
+    action = risk.note_equity(Decimal("0"), now=T0)
+    assert action is not None and action.force_flat
+    assert risk.state == HaltState.HALTED_DRAWDOWN
+
+
+def test_zero_day_anchor_reseeds_instead_of_dividing(risk):
+    risk.note_equity(Decimal("0"), now=T0)   # halts, anchors the day at 0
+    risk.resume()
+    # Equity recovered: the stale zero anchor is re-seeded, nothing divides.
+    assert risk.note_equity(Decimal("100"), now=T0) is None
+    # And the breakers work again from the fresh anchor (3% > 2% daily limit).
+    action = risk.note_equity(Decimal("97"), now=T0)
+    assert action is not None and action.state == HaltState.HALTED_DAILY_LOSS

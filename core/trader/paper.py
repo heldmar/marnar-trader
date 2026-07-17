@@ -31,6 +31,7 @@ from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
+from trader.fsutil import atomic_write_text
 from trader.gateway import SymbolFilters, parse_filters
 
 log = logging.getLogger(__name__)
@@ -84,7 +85,16 @@ class PaperGateway:
         self._slip = slippage_bps / Decimal(10_000)
         self._filters: dict[str, SymbolFilters] = {}
         if self._path.exists():
-            self._state = json.loads(self._path.read_text())
+            try:
+                self._state = json.loads(self._path.read_text())
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                # QA1-11: a corrupt state file must refuse to trade with a clear
+                # message, not crash-loop the container on a cryptic parse error.
+                raise RuntimeError(
+                    f"paper account state file {self._path} is corrupt ({exc}); "
+                    "refusing to trade — restore it from backup or delete it to "
+                    "start a fresh paper account (resets the run)"
+                ) from exc
         else:
             self._state = {
                 "balances": {"USDT": str(initial_usdt)},
@@ -97,10 +107,9 @@ class PaperGateway:
     # -- persistence -----------------------------------------------------------
 
     def _persist(self) -> None:
-        tmp = self._path.with_suffix(".json.tmp")
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(self._state, indent=1))
-        tmp.replace(self._path)
+        # QA1-11: fsync'd atomic write — a power cut mid-persist leaves the old
+        # state, never a truncated file (the no-UPS discipline).
+        atomic_write_text(self._path, json.dumps(self._state, indent=1))
 
     # -- balances ---------------------------------------------------------------
 
@@ -143,11 +152,25 @@ class PaperGateway:
         price = mark * (1 + self._slip) if side == "BUY" else mark * (1 - self._slip)
         filters = self.symbol_filters(symbol)
         price = price.quantize(filters.price_tick, rounding=ROUND_DOWN)
+        # QA1-12: verify funds at the fill price BEFORE the order exists in
+        # state — a failed market order must leave no phantom NEW order behind.
+        qty = Decimal(quantity)
+        if side == "BUY":
+            need = qty * price * (1 + self._fee_rate)
+            if self._balance("USDT") < need:
+                raise ValueError(f"insufficient paper USDT for {symbol} buy (need {need})")
+        elif self._balance(self._base_asset(symbol)) < qty:
+            raise ValueError(f"insufficient paper balance to sell {qty} {symbol}")
         order = self._new_order(
             symbol=symbol, side=side, order_type="MARKET", quantity=quantity,
             price=None, client_order_id=client_order_id,
         )
-        self._fill(order, price)
+        try:
+            self._fill(order, price)
+        except Exception:
+            # Belt and braces: never leave a half-made order in state.
+            self._state["orders"].pop(client_order_id, None)
+            raise
         self._persist()
         return order
 

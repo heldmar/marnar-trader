@@ -107,6 +107,7 @@ class PaperEngine:
         poll_seconds: float = 60.0,
         alerts: TelegramAlerts | None = None,
         event_blackout: bool = True,  # D-23/D-26: keep as cheap insurance
+        fee_rate: float = 0.001,  # QA1-12: budget headroom uses the CONFIGURED fee
         now_ms: Callable[[], int] | None = None,
     ):
         self.journal = journal
@@ -119,6 +120,7 @@ class PaperEngine:
         self.interval = interval
         self.step = INTERVAL_MS[interval]
         self.spend = spend_usdt
+        self.fee_rate = Decimal(str(fee_rate))
         self.poll_seconds = poll_seconds
         self.alerts = alerts or TelegramAlerts()
         self.now_ms = now_ms or (lambda: int(time.time() * 1000))
@@ -166,6 +168,14 @@ class PaperEngine:
         # anchors the parity window; restarts do not move it.
         if self.journal.get_state("engine:paper_started_at") is None:
             self.journal.set_state("engine:paper_started_at", self.now_ms())
+            # QA1-15: snapshot the account equity at clock start — the parity
+            # report's baseline after any D-27 clock reset mid-account-life.
+            try:
+                self.journal.set_state(
+                    "engine:paper_initial_equity", str(self.gateway.equity_usdt())
+                )
+            except Exception as exc:  # baseline is best-effort; config fallback
+                log.warning("could not snapshot clock-start equity: %s", exc)
             self.journal.record_event(
                 "PAPER_CLOCK_STARTED", "engine",
                 {"interval": self.interval, "symbols": len(self.symbols)},
@@ -182,12 +192,17 @@ class PaperEngine:
     async def run(self) -> None:
         """The 24/7 loop. Exceptions are contained per-cycle: a failed poll is
         logged and alerted, never fatal (the Pi restarts container-level only)."""
+        warmup_failures = 0
         while not self._started:
             try:
-                self.start()
+                # QA1-09/QA2-03: warmup does chained HTTP + journal work — keep
+                # it off the event loop so the API (incl. kill switch) stays live.
+                await asyncio.to_thread(self.start)
             except Exception as exc:
+                warmup_failures += 1
                 log.exception("engine warmup failed — retrying in %ss", self.poll_seconds)
-                self.alerts.send(f"⚠️ engine warmup failed (will retry): {exc}")
+                if warmup_failures in (1, 10, 100):  # QA1-19: backoff, not spam
+                    self.alerts.send(f"⚠️ engine warmup failed (will retry): {exc}")
                 await asyncio.sleep(self.poll_seconds)
         self.alerts.send(
             f"📈 MarNar paper engine up: {len(self.symbols)} pairs, "
@@ -196,7 +211,9 @@ class PaperEngine:
         consecutive_errors = 0
         while True:
             try:
-                self.poll_once()
+                # QA1-09: the poll's blocking HTTP chain runs in a worker thread;
+                # the journal's internal lock keeps its transactions atomic.
+                await asyncio.to_thread(self.poll_once)
                 consecutive_errors = 0
             except Exception as exc:
                 consecutive_errors += 1
@@ -292,7 +309,7 @@ class PaperEngine:
     ) -> None:
         price = self.gateway.ticker_price(symbol)
         filters = self.gateway.symbol_filters(symbol)
-        budget = min(Decimal(str(quote_amount)), self._usdt_free() / (1 + Decimal("0.001")))
+        budget = min(Decimal(str(quote_amount)), self._usdt_free() / (1 + self.fee_rate))
         qty = filters.round_qty(budget / price)
         if qty < filters.min_qty or qty * price < filters.min_notional:
             self.journal.record_event(

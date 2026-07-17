@@ -20,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ValidationError
 
 from trader.config import RISK_FLOORS, AppConfig, PaperConfig, RiskLimits, save_config
@@ -46,11 +46,25 @@ def require_ui_header(request: Request) -> None:
 
 # Strategy-parameter fields whose change invalidates the running paper
 # experiment (D-27: the clock restarts on a material strategy/risk change).
-CLOCK_RESETTING_FIELDS = {"symbols", "interval", "entry_n", "exit_n", "stop_loss_pct", "spend_usdt"}
+# QA1-15: event_blackout changes what the strategy may do — it belongs here.
+CLOCK_RESETTING_FIELDS = {
+    "symbols", "interval", "entry_n", "exit_n", "stop_loss_pct", "spend_usdt",
+    "event_blackout",
+}
 
 
 def _f(value: Any) -> float | None:
     return None if value is None else float(value)
+
+
+def _downsample(points: list[dict], max_points: int = 500) -> list[dict]:
+    if len(points) <= max_points:
+        return points
+    stride = -(-len(points) // max_points)  # ceil division
+    sampled = points[::stride]
+    if sampled[-1] is not points[-1]:
+        sampled.append(points[-1])  # the newest point always survives
+    return sampled
 
 
 def _prices(request: Request, symbols: list[str]) -> dict[str, Decimal]:
@@ -100,9 +114,11 @@ async def overview(request: Request) -> dict:
         "today_pnl_usdt": today_pnl,
         "total_pnl_usdt": _f(equity - initial) if equity is not None else None,
         "open_positions": len(positions),
-        "equity_series": [
-            {"ts": r["ts"], "equity": float(r["equity"])} for r in journal.equity_series()
-        ],
+        # QA1-20: the snapshot series grows one point / 15 min forever — cap the
+        # payload by stride-sampling down to ~500 points (always keep the last).
+        "equity_series": _downsample(
+            [{"ts": r["ts"], "equity": float(r["equity"])} for r in journal.equity_series()]
+        ),
         "trade_results": [  # win/loss bars (UI-15): one bar per closed trade
             {"ts": r["ts"], "symbol": r["symbol"], "pnl": float(r["realized_pnl"])}
             for r in pnl_rows
@@ -143,12 +159,41 @@ async def positions(request: Request) -> list[dict]:
 
 
 @router.get("/timeline")
-async def timeline(request: Request, symbol: str | None = None, limit: int = 100) -> list[dict]:
+async def timeline(
+    request: Request,
+    symbol: str | None = None,
+    limit: int = Query(100, ge=1, le=500),  # QA1-04: no unbounded/negative dumps
+) -> list[dict]:
     """Deep layer: every executed trade with its journaled reason (D-23:
     the rule + numbers that fired) and nearby headlines as separate context."""
     journal = request.app.state.journal
+    trades = journal.trade_history(symbol=symbol, limit=limit)
+    # QA1-04/QA1-20: one batched news query for the whole page, bucketed per
+    # trade in Python — not one ±24h window query per trade (the old N+1).
+    def _parseable(ts: str) -> bool:
+        # QA1-13: tolerate a malformed row (e.g. a legacy epoch-ms stamp) —
+        # it just gets no news context instead of 500ing the whole timeline.
+        try:
+            datetime.fromisoformat(ts)
+            return True
+        except ValueError:
+            return False
+
+    stamps = sorted(
+        ts for t in trades if (ts := t["executed_at"] or t["created_at"]) and _parseable(ts)
+    )
+    news_by_ts: dict[str, list] = {}
+    if stamps:
+        window = timedelta(hours=24.0)
+        lo = (datetime.fromisoformat(stamps[0]) - window).isoformat(timespec="milliseconds")
+        hi = (datetime.fromisoformat(stamps[-1]) + window).isoformat(timespec="milliseconds")
+        all_news = journal.news_between(lo, hi)
+        for ts in stamps:
+            t0 = (datetime.fromisoformat(ts) - window).isoformat(timespec="milliseconds")
+            t1 = (datetime.fromisoformat(ts) + window).isoformat(timespec="milliseconds")
+            news_by_ts[ts] = [n for n in all_news if t0 <= n["seen_at"] <= t1]
     items: list[dict] = []
-    for t in journal.trade_history(symbol=symbol, limit=limit):
+    for t in trades:
         reason = None
         for ev in journal.events_for(t["client_order_id"]):
             if ev["kind"] == "TRADE_REASON":
@@ -167,7 +212,7 @@ async def timeline(request: Request, symbol: str | None = None, limit: int = 100
             "news_context": [  # context only — never presented as the cause
                 {"seen_at": n["seen_at"], "source": n["source"],
                  "title": n["title"], "url": n["url"]}
-                for n in journal.news_around(ts, hours=24.0)
+                for n in news_by_ts.get(ts, [])
             ] if ts else [],
         })
     system_kinds = ["PAPER_CLOCK_STARTED", "PAPER_CLOCK_RESET", "HALT_EXECUTED", "RESUMED",
@@ -184,12 +229,18 @@ async def timeline(request: Request, symbol: str | None = None, limit: int = 100
 
 
 @router.get("/news")
-async def news(request: Request, limit: int = 50, before: str | None = None) -> list[dict]:
+async def news(
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),  # QA1-04
+    before: str | None = None,
+) -> list[dict]:
     return [dict(n) for n in request.app.state.journal.news_page(limit=limit, before_iso=before)]
 
 
 @router.get("/reports")
-async def reports_index(request: Request, limit: int = 100) -> list[dict]:
+async def reports_index(
+    request: Request, limit: int = Query(100, ge=1, le=500)  # QA2-05
+) -> list[dict]:
     """S7 report archive index, newest first (no bodies — see the detail route)."""
     return [
         {
@@ -267,6 +318,15 @@ async def put_config(request: Request, update: ConfigUpdate) -> dict:
     require_ui_header(request)
     state = request.app.state
     config: AppConfig = state.config
+    if "initial_usdt" in update.paper:
+        # QA1-15: changing it after first boot silently does nothing to the
+        # account balance and skews every P&L-vs-start figure. Reject outright;
+        # a different capital base means a fresh paper run (delete the volume).
+        raise HTTPException(
+            422,
+            "initial_usdt cannot be changed on a running paper account — "
+            "reset the paper run to start with different capital",
+        )
     try:
         new_paper = PaperConfig(**{**config.paper.model_dump(), **update.paper})
         new_risk = RiskLimits(**{**config.risk.model_dump(), **update.risk})

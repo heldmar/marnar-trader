@@ -9,6 +9,7 @@ dependencies = [
     "uvicorn>=0.30",
     "pydantic>=2.8",
     "PyYAML>=6.0",
+    "requests>=2.31",  # QA1-05: used directly (alerts, news) — declare it
     "pyarrow>=17.0",
 ]
 

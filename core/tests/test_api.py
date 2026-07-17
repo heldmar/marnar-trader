@@ -85,9 +85,11 @@ def test_positions_include_live_price_unrealized_pnl_and_stops(client):
 
     (pos,) = client.http.get("/api/positions").json()
     assert pos["symbol"] == "BTCUSDT"
-    assert pos["entry_price"] == pytest.approx(50000)
+    # QA1-16 (D-34): cost basis includes the entry fee, so the effective entry
+    # price sits just above the fill price and unrealized P&L nets the fee out.
+    assert pos["entry_price"] == pytest.approx((0.0003 * 50000 + 0.01) / 0.0003)
     assert pos["current_price"] == pytest.approx(51000)
-    assert pos["unrealized_pnl_usdt"] == pytest.approx(0.0003 * 1000)
+    assert pos["unrealized_pnl_usdt"] == pytest.approx(0.0003 * 1000 - 0.01)
     assert pos["stop_price"] == pytest.approx(48500)
 
 
@@ -204,3 +206,50 @@ def test_system_reports_freshness(client):
     data = client.http.get("/api/system").json()
     assert data["last_candle_processed"] == 1_784_160_000_000
     assert data["news_items_24h"] == 1
+
+
+def test_config_rejects_initial_usdt_change(client):
+    """QA1-15: changing starting capital mid-run is a lie about P&L — refused."""
+    resp = client.http.put("/api/config", json={"paper": {"initial_usdt": 500.0}})
+    assert resp.status_code == 422
+    assert "initial_usdt" in resp.json()["detail"]
+
+
+def test_event_blackout_change_needs_clock_ack(client):
+    """QA1-15: event_blackout changes what the strategy may do — D-27 field."""
+    resp = client.http.put("/api/config", json={"paper": {"event_blackout": False}})
+    assert resp.status_code == 409
+    ok = client.http.put(
+        "/api/config",
+        json={"paper": {"event_blackout": False}, "acknowledge_clock_reset": True},
+    )
+    assert ok.status_code == 200 and ok.json()["clock_reset"] is True
+
+
+def test_config_rejects_unknown_keys(client):
+    """QA1-08: a typo'd field must error, not silently save nothing."""
+    resp = client.http.put("/api/config", json={"paper": {"entryn": 20}})
+    assert resp.status_code == 422
+
+
+def test_query_limits_are_bounded(client):
+    """QA1-04/QA2-05: no unbounded/negative dumps."""
+    assert client.http.get("/api/timeline?limit=-1").status_code == 422
+    assert client.http.get("/api/timeline?limit=100000").status_code == 422
+    assert client.http.get("/api/news?limit=-1").status_code == 422
+    assert client.http.get("/api/reports?limit=0").status_code == 422
+
+
+def test_timeline_tolerates_malformed_timestamp_rows(client):
+    """QA1-13: one legacy epoch-ms row must not 500 the whole timeline."""
+    coid = _record_trade(client.journal, "BUY", "50000")
+    # Forge a legacy-style epoch stamp directly onto the fill row.
+    with client.journal._lock, client.journal._conn:
+        client.journal._conn.execute(
+            "UPDATE fills SET executed_at='1752700000000' WHERE client_order_id=?",
+            (coid,),
+        )
+    resp = client.http.get("/api/timeline")
+    assert resp.status_code == 200
+    trade = next(i for i in resp.json() if i["type"] == "trade")
+    assert trade["news_context"] == []  # no context, but the row renders

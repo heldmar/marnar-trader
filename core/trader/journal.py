@@ -17,8 +17,9 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -185,13 +186,18 @@ class Journal:
         # serialized, and our single-writer discipline holds regardless.
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # QA1-09/QA2-03: engine and report cycles now run in worker threads
+        # (asyncio.to_thread) while API endpoints stay on the event loop. The
+        # lock keeps each `with journal._lock, journal._conn:` transaction
+        # atomic across threads — the single-writer discipline, enforced.
+        self._lock = threading.RLock()
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._migrate()
 
     def _migrate(self) -> None:
-        with self._conn:
+        with self._lock, self._conn:
             self._conn.executescript(_SCHEMA)
             row = self._conn.execute("SELECT version FROM schema_version").fetchone()
             if row is None:
@@ -223,7 +229,7 @@ class Journal:
 
     def record_event(self, kind: str, ref_id: str, payload: dict[str, Any] | None = None) -> None:
         """Standalone committed audit event (risk rejections, halt execution, ...)."""
-        with self._conn:
+        with self._lock, self._conn:
             self._event(kind, ref_id, payload)
 
     # -- intent lifecycle ----------------------------------------------------
@@ -240,7 +246,7 @@ class Journal:
         nonce: str,
     ) -> str:
         intent_id = make_intent_id(symbol, side, order_type, quantity, price, nonce)
-        with self._conn:
+        with self._lock, self._conn:
             self._conn.execute(
                 "INSERT OR IGNORE INTO intents"
                 "(intent_id, created_at, symbol, side, order_type, quantity, price, source)"
@@ -261,7 +267,7 @@ class Journal:
             raise KeyError(f"unknown intent {intent_id}")
         coid = client_order_id_for(intent_id)
         now = utcnow()
-        with self._conn:
+        with self._lock, self._conn:
             self._conn.execute(
                 "INSERT OR IGNORE INTO orders"
                 "(client_order_id, intent_id, symbol, side, order_type, quantity, price,"
@@ -280,7 +286,7 @@ class Journal:
 
     def record_order_ack(self, client_order_id: str, exchange_order_id: str, status: str) -> None:
         """Exchange accepted the order — called right after the network call returns."""
-        with self._conn:
+        with self._lock, self._conn:
             self._conn.execute(
                 "UPDATE orders SET exchange_order_id=?, status=?, updated_at=?"
                 " WHERE client_order_id=?",
@@ -294,7 +300,7 @@ class Journal:
     def record_order_status(
         self, client_order_id: str, status: str, payload: dict[str, Any] | None = None
     ) -> None:
-        with self._conn:
+        with self._lock, self._conn:
             self._conn.execute(
                 "UPDATE orders SET status=?, updated_at=? WHERE client_order_id=?",
                 (status, utcnow(), client_order_id),
@@ -315,7 +321,7 @@ class Journal:
         """Record a fill and, in the same transaction, update the position and
         (on SELL) the realized-P&L ledger. Idempotent: a fill_id seen before is
         ignored and does NOT re-apply to the position."""
-        with self._conn:
+        with self._lock, self._conn:
             cur = self._conn.execute(
                 "INSERT OR IGNORE INTO fills"
                 "(fill_id, client_order_id, quantity, price, fee, fee_asset, executed_at)"
@@ -345,11 +351,15 @@ class Journal:
             "SELECT quantity, cost FROM positions WHERE symbol=?", (symbol,)
         ).fetchone()
         if side == "BUY":
+            # QA1-16 (D-34): the entry fee is part of what the position cost —
+            # realized P&L on the eventual SELL is measured against it, so a
+            # round trip that only covers one fee is truthfully a loss. The
+            # backtester uses the same convention (backtest.py fill()).
             if row is None:
-                qty, cost = quantity, quantity * price
+                qty, cost = quantity, quantity * price + fee
             else:
                 qty = Decimal(row["quantity"]) + quantity
-                cost = Decimal(row["cost"]) + quantity * price
+                cost = Decimal(row["cost"]) + quantity * price + fee
             self._conn.execute(
                 "INSERT INTO positions(symbol, quantity, cost, updated_at) VALUES (?,?,?,?)"
                 " ON CONFLICT(symbol) DO UPDATE SET quantity=?, cost=?, updated_at=?",
@@ -386,7 +396,7 @@ class Journal:
         return default if row is None else json.loads(row["value"])
 
     def set_state(self, key: str, value: Any) -> None:
-        with self._conn:
+        with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO app_state(key, value, updated_at) VALUES (?,?,?)"
                 " ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
@@ -400,7 +410,7 @@ class Journal:
         self, *, url: str, title: str, source: str | None, published: str | None, seen_at: str
     ) -> bool:
         """Store a headline; returns False if the URL was already known."""
-        with self._conn:
+        with self._lock, self._conn:
             cur = self._conn.execute(
                 "INSERT OR IGNORE INTO news_items(url, seen_at, published, source, title)"
                 " VALUES (?,?,?,?,?)",
@@ -416,7 +426,7 @@ class Journal:
     # -- equity snapshots (S6: UI equity curve) --------------------------------
 
     def record_equity_snapshot(self, equity: str, ts: str | None = None) -> None:
-        with self._conn:
+        with self._lock, self._conn:
             self._conn.execute(
                 "INSERT OR REPLACE INTO equity_snapshots(ts, equity) VALUES (?,?)",
                 (ts or utcnow(), equity),
@@ -442,7 +452,7 @@ class Journal:
         self, *, kind: str, period: str, summary: dict[str, Any], body_md: str
     ) -> None:
         """Store (or regenerate) a report. (kind, period) is the idempotency key."""
-        with self._conn:
+        with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO reports(kind, period, generated_at, summary, body_md)"
                 " VALUES (?,?,?,?,?)"
@@ -452,13 +462,27 @@ class Journal:
                 (kind, period, utcnow(), json.dumps(summary, default=str), body_md),
             )
 
+    @staticmethod
+    def _period_start(kind: str, period: str) -> str:
+        """Calendar start date of a report period, for sorting. Daily periods
+        are their own date; weekly '2026-W29' starts on that ISO week's Monday.
+        (QA2-04: raw string order puts every 'YYYY-Wnn' above every date.)"""
+        if kind == "weekly":
+            year, week = int(period[:4]), int(period.split("-W")[1])
+            return date.fromisocalendar(year, week, 1).isoformat()
+        return period
+
     def reports_list(self, limit: int = 100) -> list[sqlite3.Row]:
-        """Newest-first report index (no bodies — the archive list view)."""
-        return self._conn.execute(
+        """Newest-first report index (no bodies — the archive list view).
+        Sorted by true period start date; a week sorts just above its Monday."""
+        rows = self._conn.execute(
             "SELECT kind, period, generated_at, summary FROM reports"
-            " ORDER BY period DESC, kind LIMIT ?",
-            (limit,),
         ).fetchall()
+        rows.sort(
+            key=lambda r: (self._period_start(r["kind"], r["period"]), r["kind"]),
+            reverse=True,
+        )
+        return rows[:limit]
 
     def get_report(self, kind: str, period: str) -> sqlite3.Row | None:
         return self._conn.execute(
@@ -502,13 +526,68 @@ class Journal:
             " ORDER BY f.executed_at"
         ).fetchall()
 
-    def trade_history(self, symbol: str | None = None, limit: int = 200) -> list[sqlite3.Row]:
+    def fills_between(self, lo_iso: str, hi_iso: str) -> list[sqlite3.Row]:
+        """Side-joined fills within [lo, hi) — period-bounded (QA2-06)."""
+        return self._conn.execute(
+            "SELECT o.side AS side, o.symbol AS symbol, f.quantity AS quantity,"
+            " f.price AS price, f.fee AS fee, f.executed_at AS executed_at"
+            " FROM fills f JOIN orders o ON o.client_order_id = f.client_order_id"
+            " WHERE f.executed_at >= ? AND f.executed_at < ?"
+            " ORDER BY f.executed_at",
+            (lo_iso, hi_iso),
+        ).fetchall()
+
+    def events_of_kind_between(
+        self, kinds: list[str], lo_iso: str, hi_iso: str
+    ) -> list[sqlite3.Row]:
+        """Events of the given kinds within [lo, hi) — no global row cap, so a
+        regenerated old period can never silently lose rows (QA2-06)."""
+        marks = ",".join("?" for _ in kinds)
+        return self._conn.execute(
+            f"SELECT ts, kind, ref_id, payload FROM events WHERE kind IN ({marks})"
+            " AND ts >= ? AND ts < ? ORDER BY event_id",
+            (*kinds, lo_iso, hi_iso),
+        ).fetchall()
+
+    def news_count_between(self, lo_iso: str, hi_iso: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM news_items WHERE seen_at >= ? AND seen_at < ?",
+            (lo_iso, hi_iso),
+        ).fetchone()
+        return int(row["n"])
+
+    def news_between(self, lo_iso: str, hi_iso: str) -> list[sqlite3.Row]:
+        """Headlines within [lo, hi) — one batched query for a whole timeline
+        page instead of one window query per trade (QA1-04/QA1-20)."""
+        return self._conn.execute(
+            "SELECT * FROM news_items WHERE seen_at >= ? AND seen_at < ?"
+            " ORDER BY seen_at",
+            (lo_iso, hi_iso),
+        ).fetchall()
+
+    def trade_history(
+        self,
+        symbol: str | None = None,
+        limit: int = 200,
+        *,
+        since_iso: str | None = None,
+        before_iso: str | None = None,
+    ) -> list[sqlite3.Row]:
         """Executed orders newest-first with aggregated fill price/qty/fee and the
-        intent's source — the UI trade timeline's raw material."""
+        intent's source — the UI trade timeline's raw material. The aggregated
+        money columns are REAL (display only; exact math stays in Decimal paths).
+        ``since_iso``/``before_iso`` bound by last execution time (QA2-06)."""
         where, params = "WHERE f.fill_id IS NOT NULL", []
         if symbol:
             where += " AND o.symbol = ?"
             params.append(symbol)
+        having, hparams = "", []
+        if since_iso is not None:
+            having += " HAVING MAX(f.executed_at) >= ?"
+            hparams.append(since_iso)
+        if before_iso is not None:
+            having += (" AND" if having else " HAVING") + " MAX(f.executed_at) < ?"
+            hparams.append(before_iso)
         return self._conn.execute(
             "SELECT o.client_order_id, o.symbol, o.side, o.status, o.created_at,"
             " i.source AS source,"
@@ -522,8 +601,9 @@ class Journal:
             " LEFT JOIN fills f ON f.client_order_id = o.client_order_id"
             f" {where}"
             " GROUP BY o.client_order_id"
+            f"{having}"
             " ORDER BY executed_at DESC LIMIT ?",
-            (*params, limit),
+            (*params, *hparams, limit),
         ).fetchall()
 
     def pnl_entries_since(self, ts_iso: str = "") -> list[sqlite3.Row]:
@@ -534,11 +614,12 @@ class Journal:
         ).fetchall()
 
     def fees_total(self) -> Decimal:
-        row = self._conn.execute(
-            "SELECT COALESCE(SUM(CAST(fee AS REAL)), 0) AS total FROM fills"
-            " WHERE fee_asset = 'USDT' OR fee_asset IS NULL"
-        ).fetchone()
-        return Decimal(str(row["total"]))
+        # QA1-17: money aggregation in Decimal, not IEEE floats — row counts
+        # are small (one per fill) and the schema stores exact decimal strings.
+        rows = self._conn.execute(
+            "SELECT fee FROM fills WHERE fee_asset = 'USDT' OR fee_asset IS NULL"
+        ).fetchall()
+        return sum((Decimal(r["fee"]) for r in rows), Decimal("0"))
 
     def events_of_kind(self, kinds: list[str], limit: int = 100) -> list[sqlite3.Row]:
         marks = ",".join("?" for _ in kinds)

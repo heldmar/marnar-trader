@@ -14,12 +14,20 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 import requests
 
 log = logging.getLogger(__name__)
 
 _API = "https://api.telegram.org"
+_TOKEN_RE = re.compile(r"/bot[^/\s'\"]+")
+
+
+def _scrub(exc: object) -> str:
+    """QA1-02/QA2-02: requests exceptions embed the full URL — including
+    /bot<TOKEN>/ — in their message. Never log a secret."""
+    return _TOKEN_RE.sub("/bot***", str(exc))
 
 
 class TelegramAlerts:
@@ -61,7 +69,7 @@ class TelegramAlerts:
                 return []
             return resp.json().get("result", [])
         except Exception as exc:
-            log.warning("telegram getUpdates error: %s", exc)
+            log.warning("telegram getUpdates error: %s", _scrub(exc))
             return []
 
     def send(self, text: str) -> bool:
@@ -80,5 +88,5 @@ class TelegramAlerts:
                 return False
             return True
         except Exception as exc:
-            log.error("telegram send error: %s", exc)
+            log.error("telegram send error: %s", _scrub(exc))
             return False

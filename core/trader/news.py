@@ -70,6 +70,10 @@ class NewsIngestor:
             url, title = a.get("url"), (a.get("title") or "").strip()
             if not url or not title:
                 continue
+            # QA1-06: the feed is an external crawler — only http(s) URLs may
+            # reach the UI's clickable links (a javascript: URL would execute).
+            if not url.startswith(("http://", "https://")):
+                continue
             if self.journal.record_news_item(
                 url=url,
                 title=title,

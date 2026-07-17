@@ -105,19 +105,16 @@ class ReportBuilder:
                 break
             v = float(row["realized_pnl"])
             realized += v
-            wins, losses = wins + (v > 0), losses + (v <= 0)
+            # QA2-07: a break-even round trip is neither a win nor a loss.
+            wins, losses = wins + (v > 0), losses + (v < 0)
 
-        fees = sum(
-            float(f["fee"])
-            for f in self.journal.fills_with_side()
-            if lo <= f["executed_at"] < hi
-        )
+        # QA2-06: period-bounded queries — no global row caps that could make a
+        # regenerated old period silently incomplete once history grows.
+        fees = sum(float(f["fee"]) for f in self.journal.fills_between(lo, hi))
 
         trades = []
-        for t in self.journal.trade_history(limit=1000):
+        for t in self.journal.trade_history(limit=1000, since_iso=lo, before_iso=hi):
             ts = t["executed_at"] or t["created_at"]
-            if not (lo <= ts < hi):
-                continue
             reason = None
             for ev in self.journal.events_for(t["client_order_id"]):
                 if ev["kind"] == "TRADE_REASON":
@@ -131,7 +128,7 @@ class ReportBuilder:
 
         halts = self._events_between(_HALT_KINDS, lo, hi)
         skips = self._events_between(_SKIP_KINDS, lo, hi)
-        news_count = sum(1 for n in self.journal.news_since(lo) if n["seen_at"] < hi)
+        news_count = self.journal.news_count_between(lo, hi)
 
         return {
             "equity_open": equity_open,
@@ -159,8 +156,7 @@ class ReportBuilder:
     def _events_between(self, kinds: list[str], lo: str, hi: str) -> list[dict]:
         return [
             {"ts": ev["ts"], "kind": ev["kind"], "detail": json.loads(ev["payload"])}
-            for ev in self.journal.events_of_kind(kinds, limit=1000)
-            if lo <= ev["ts"] < hi
+            for ev in self.journal.events_of_kind_between(kinds, lo, hi)
         ]
 
     # -- rendering (UI-12..15: plain language, onion layers) ----------------
@@ -195,6 +191,12 @@ class ReportBuilder:
             f"**P&L: {money(s['pnl_usdt'], signed=True)} ({s['pnl_pct']:+.2f}%)** — "
             f"money went from {money(s['equity_open'])} to {money(s['equity_close'])}."
         )
+        if s.get("partial_from"):
+            out.append("")
+            out.append(
+                f"*Partial period: the practice run started on {s['partial_from']}, "
+                "so this report covers only the days since then.*"
+            )
         out.append("")
         if s["quiet"]:
             out.append(
@@ -279,7 +281,17 @@ class ReportScheduler:
         /reports_on. Messages from any other chat are ignored (and consumed).
         Returns how many commands were applied."""
         offset = int(self.journal.get_state(TG_OFFSET_KEY, 0))
-        updates = self.alerts.get_updates(offset)
+        # QA2-10: drain the queue — Telegram pages at ~100 updates/call, and a
+        # spammed bot must not delay the owner's command by many cycles.
+        updates: list[dict] = []
+        next_offset = offset
+        for _ in range(10):
+            page = self.alerts.get_updates(next_offset)
+            updates.extend(page)
+            if page:
+                next_offset = max(int(u.get("update_id", 0)) for u in page) + 1
+            if len(page) < 100:
+                break
         applied = 0
         for u in updates:
             offset = max(offset, int(u.get("update_id", 0)) + 1)
@@ -340,6 +352,10 @@ class ReportScheduler:
         bounds = day_bounds(period) if kind == "daily" else week_bounds(period)
         start, end = bounds
         stats = self.builder.build_stats(start, end)
+        p_start = self._paper_start()
+        if p_start is not None and start < p_start:
+            # QA2-09: the first period can begin before the run did — say so.
+            stats["partial_from"] = p_start.date().isoformat()
         body_md = self.builder.render_markdown(kind, period, stats)
         summary = {k: v for k, v in stats.items() if k not in ("trades", "halts", "skips")}
         summary["halt_count"] = len(stats["halts"])
@@ -355,18 +371,30 @@ class ReportScheduler:
         log.info("report generated: %s %s (fresh=%s sent=%s)", kind, period, fresh, sent)
         return stats
 
+    MAX_PER_CYCLE = 12  # QA2-03: spread a huge backfill over cycles, don't stall
+
     def catch_up_once(self) -> int:
-        """One cycle: generate every missing report. Returns how many landed."""
+        """One cycle: generate missing reports (capped). Returns how many landed."""
         missing = self.missing_periods()
-        for kind, period in missing:
+        for kind, period in missing[: self.MAX_PER_CYCLE]:
             self.generate(kind, period)
-        return len(missing)
+        if len(missing) > self.MAX_PER_CYCLE:
+            log.info(
+                "report backfill: %d generated, %d left for next cycles",
+                self.MAX_PER_CYCLE, len(missing) - self.MAX_PER_CYCLE,
+            )
+        return min(len(missing), self.MAX_PER_CYCLE)
+
+    def _cycle(self) -> None:
+        self.process_commands()
+        self.catch_up_once()
 
     async def run(self, *, every_seconds: float = 300.0) -> None:
         while True:
             try:
-                self.process_commands()
-                self.catch_up_once()
+                # QA2-03: Telegram HTTP + journal scans belong in a worker
+                # thread — the event loop (API, kill switch) must stay free.
+                await asyncio.to_thread(self._cycle)
             except Exception as exc:
                 log.warning("report cycle failed (retrying next cycle): %s", exc)
             await asyncio.sleep(every_seconds)

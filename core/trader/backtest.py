@@ -35,7 +35,7 @@ class BacktestParams:
 @dataclass(slots=True)
 class Position:
     qty: float = 0.0
-    cost: float = 0.0  # total quote spent incl. nothing (avg entry basis)
+    cost: float = 0.0  # total quote spent incl. entry fees (avg entry basis, QA1-16)
     stop_loss: float | None = None
     take_profit: float | None = None
 
@@ -181,7 +181,9 @@ class Backtester:
             if side == "BUY":
                 ctx.cash -= notional + fee
                 pos.qty += qty
-                pos.cost += notional
+                # QA1-16 (D-34): entry fee is part of the cost basis — the same
+                # convention as the journal, so per-trade realized P&L matches.
+                pos.cost += notional + fee
                 realized = 0.0
             else:
                 realized = (price - pos.avg_cost) * qty - fee

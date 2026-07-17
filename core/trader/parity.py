@@ -234,12 +234,20 @@ def paper_stats(
     started = journal.get_state("engine:paper_started_at")
     if started is None:
         return None
+    # QA1-15: the paper side must count only what happened since the clock
+    # started — after a D-27 clock reset, pre-reset fills would otherwise make
+    # the parity comparison structurally wrong.
+    started_iso = datetime.fromtimestamp(int(started) / 1000, tz=UTC).isoformat(
+        timespec="milliseconds"
+    )
+    baseline = journal.get_state("engine:paper_initial_equity")
+    if baseline is not None:
+        initial = float(baseline)
     buys = sells = 0
-    fees = buy_fees = 0.0
-    for r in journal.fills_with_side():
+    fees = 0.0
+    for r in journal.fills_between(started_iso, "9999"):
         if r["side"] == "BUY":
             buys += 1
-            buy_fees += float(r["fee"])
         else:
             sells += 1
         fees += float(r["fee"])
@@ -251,11 +259,12 @@ def paper_stats(
             continue
         last = store.read(pos["symbol"], interval, start_ms=cov[1])
         equity_open += float(pos["quantity"]) * last[-1].close
-    # Cash reconstructed from flows: SELL flows land in realized pnl (fee
-    # already deducted there); BUY flows are open cost basis + buy-side fees.
-    realized = float(journal.realized_pnl_since("1970"))
+    # Cash reconstructed from flows. With the QA1-16 convention (entry fee in
+    # the cost basis) a round trip's realized P&L equals its net cash flow, and
+    # open positions' cost already includes their buy fees.
+    realized = float(journal.realized_pnl_since(started_iso))
     open_cost = sum(float(p["cost"]) for p in journal.positions())
-    cash = initial - open_cost + realized - buy_fees
+    cash = initial - open_cost + realized
     return PaperStats(
         started_at_ms=int(started),
         buys=buys,

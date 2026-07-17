@@ -300,3 +300,31 @@ class TestJournalV5:
         j2 = Journal(db)  # must migrate, not raise
         assert j2.get_report("daily", DAY) is None
         j2.close()
+
+
+class TestArchiveOrdering:
+    def test_weeklies_interleave_with_dailies_by_date(self, journal):
+        """QA2-04: '2026-W29' must sort at its Monday, not above December."""
+        for kind, period in [
+            ("daily", "2026-07-16"), ("weekly", "2026-W29"),  # W29 starts 07-13
+            ("daily", "2026-12-31"), ("weekly", "2026-W53"),  # W53 starts 12-28
+        ]:
+            journal.save_report(kind=kind, period=period, summary={}, body_md="x")
+        got = [(r["kind"], r["period"]) for r in journal.reports_list()]
+        assert got == [
+            ("daily", "2026-12-31"), ("weekly", "2026-W53"),
+            ("daily", "2026-07-16"), ("weekly", "2026-W29"),
+        ]
+
+
+class TestPartialPeriods:
+    def test_first_weekly_report_says_it_is_partial(self, journal):
+        """QA2-09: a week that began before the paper run says so."""
+        journal.set_state("engine:paper_started_at", 1784229120000)  # 2026-07-16
+        sched = ReportScheduler(
+            journal, SpyAlerts(),
+            now=lambda: datetime.fromisoformat("2026-07-20T01:00:00+00:00"),
+        )
+        sched.generate("weekly", "2026-W29")  # week started Mon 2026-07-13
+        body = journal.get_report("weekly", "2026-W29")["body_md"]
+        assert "Partial period" in body and "2026-07-16" in body

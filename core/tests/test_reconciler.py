@@ -97,3 +97,18 @@ def test_exchange_lookup_failure_is_dirty(journal, gateway):
 def test_clean_empty_run(journal, gateway):
     report = Reconciler(journal, gateway).run()
     assert report.clean and report.summary()["clean"] is True
+
+
+def test_synced_fill_timestamps_are_iso(journal, gateway):
+    """QA1-13: reconciler fills store ISO-8601, not Binance epoch-ms."""
+    from datetime import datetime
+
+    coid = journal_submitting(journal)
+    gateway.place_limit_order(symbol="BTCUSDT", side="BUY", quantity="0.001",
+                              price="50000", client_order_id=coid)
+    journal.record_order_ack(coid, str(gateway.orders[coid]["orderId"]), "NEW")
+    gateway.simulate_fill(coid)
+    Reconciler(journal, gateway).run()
+    row = journal._conn.execute("SELECT executed_at FROM fills").fetchone()
+    parsed = datetime.fromisoformat(row["executed_at"])  # must not raise
+    assert parsed.tzinfo is not None

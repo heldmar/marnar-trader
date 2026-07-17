@@ -58,3 +58,14 @@ def test_fetch_failure_propagates_for_caller_retry(journal, bad):
 
     with pytest.raises(type(bad)):
         NewsIngestor(journal, Exploding()).ingest_once()
+
+
+def test_non_http_urls_are_dropped_at_ingest(journal):
+    """QA1-06: a javascript: URL from the crawler must never become a link."""
+    evil = [
+        {"url": "javascript:alert(1)", "title": "Click me", "domain": "x"},
+        {"url": "https://example.com/ok", "title": "Fine article", "domain": "x"},
+    ]
+    assert NewsIngestor(journal, FakeHeadlines(evil)).ingest_once() == 1
+    (item,) = journal.news_since("1970")
+    assert item["url"] == "https://example.com/ok"

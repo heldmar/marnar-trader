@@ -159,6 +159,14 @@ class RiskManager:
         if self.state != HaltState.RUNNING:
             return None  # already halted; nothing new to trip
 
+        # QA1-18: zero/negative equity is itself a halt-worthy state — and it
+        # would otherwise divide-by-zero the breaker math below, failing the
+        # poll cycle exactly at total loss.
+        if equity <= 0:  # (peak >= equity always, so peak > 0 whenever equity > 0)
+            reason = f"equity {equity} is zero or negative — full halt to preserve capital records"
+            self._set_halt(HaltState.HALTED_DRAWDOWN, reason)
+            return HaltAction(HaltState.HALTED_DRAWDOWN, reason, force_flat=True)
+
         drawdown_pct = (Decimal(peak) - equity) / Decimal(peak) * 100
         if drawdown_pct >= Decimal(str(self._limits.max_drawdown_pct)):
             reason = (
@@ -169,6 +177,9 @@ class RiskManager:
             return HaltAction(HaltState.HALTED_DRAWDOWN, reason, force_flat=True)
 
         day_equity = Decimal(anchor["equity"])
+        if day_equity <= 0:  # QA1-18: stale anchor from a zero-equity day
+            self._journal.set_state(DAY_ANCHOR_KEY, {"date": today, "equity": str(equity)})
+            return None
         daily_loss_pct = (day_equity - equity) / day_equity * 100
         if daily_loss_pct >= Decimal(str(self._limits.max_daily_loss_pct)):
             reason = (

@@ -164,3 +164,27 @@ def test_reconciler_adopts_paper_order_after_crash_mid_submit(tmp_path, paper):
     pos = journal.position_for("BTCUSDT")
     assert pos is not None and Decimal(pos["quantity"]) == Decimal("0.0002")
     journal.close()
+
+
+def test_market_buy_with_insufficient_funds_leaves_no_phantom_order(paper):
+    """QA1-12: a failed market order must not linger as a NEW order in state."""
+    with pytest.raises(ValueError):
+        paper.place_market_order(
+            symbol="BTCUSDT", side="BUY", quantity="1", client_order_id="mnt-broke"
+        )
+    assert paper.open_orders() == []
+    assert paper.get_order(symbol="BTCUSDT", client_order_id="mnt-broke") is None
+    # A later persist must not resurrect it on disk either.
+    paper.place_market_order(
+        symbol="BTCUSDT", side="BUY", quantity="0.0001", client_order_id="mnt-ok"
+    )
+    reloaded = PaperGateway(paper._path, paper._prices)
+    assert reloaded.get_order(symbol="BTCUSDT", client_order_id="mnt-broke") is None
+
+
+def test_corrupt_state_file_fails_with_clear_message(tmp_path, prices):
+    """QA1-11: refuse to trade with a readable error, not a crash-loop."""
+    bad = tmp_path / "paper.json"
+    bad.write_text('{"balances": {"USDT"')  # truncated by a power cut
+    with pytest.raises(RuntimeError, match="corrupt"):
+        PaperGateway(bad, prices)
