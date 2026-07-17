@@ -12,8 +12,18 @@ import { Settings } from './screens/Settings'
 type Tab = 'home' | 'activity' | 'settings'
 const REFRESH_MS = 30_000
 
+function tabFromUrl(): Tab {
+  const t = new URLSearchParams(window.location.search).get('tab')
+  return t === 'activity' || t === 'settings' ? t : 'home'
+}
+
 export default function App() {
-  const [tab, setTab] = useState<Tab>('home')
+  const [tab, setTabState] = useState<Tab>(tabFromUrl)
+  const setTab = useCallback((t: Tab) => {
+    setTabState(t)
+    const url = t === 'home' ? window.location.pathname : `?tab=${t}`
+    window.history.replaceState(null, '', url)
+  }, [])
   const [overview, setOverview] = useState<Overview | null>(null)
   const [positions, setPositions] = useState<Position[]>([])
   const [timeline, setTimeline] = useState<TimelineItem[]>([])
