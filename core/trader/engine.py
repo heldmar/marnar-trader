@@ -103,7 +103,7 @@ class PaperEngine:
         entry_n: int = 15,
         exit_n: int = 15,
         stop_loss_pct: float = 3.0,
-        spend_usdt: float = 15.0,
+        spend_pct: float = 9.0,
         poll_seconds: float = 60.0,
         alerts: TelegramAlerts | None = None,
         event_blackout: bool = True,  # D-23/D-26: keep as cheap insurance
@@ -119,7 +119,7 @@ class PaperEngine:
         self.symbols = symbols
         self.interval = interval
         self.step = INTERVAL_MS[interval]
-        self.spend = spend_usdt
+        self.spend_pct = spend_pct
         self.fee_rate = Decimal(str(fee_rate))
         self.poll_seconds = poll_seconds
         self.alerts = alerts or TelegramAlerts()
@@ -137,7 +137,9 @@ class PaperEngine:
 
         def make_strategy():
             inner = DonchianBreakout(
-                entry_n, exit_n, spend_usdt=spend_usdt, stop_loss_pct=stop_loss_pct
+                entry_n, exit_n,
+                spend_pct=spend_pct, equity_provider=lambda: float(self.gateway.equity_usdt()),
+                stop_loss_pct=stop_loss_pct,
             )
             return EventBlackout(inner, events) if events else inner
 

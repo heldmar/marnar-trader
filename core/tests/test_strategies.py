@@ -134,6 +134,21 @@ class TestDonchianBreakout:
         with pytest.raises(ValueError):
             DonchianBreakout(entry_n=1)
 
+    def test_spend_pct_sizes_off_live_equity_not_fixed_dollars(self):
+        """Incident 2026-07-21: a fixed spend_usdt deadlocks against the
+        per-coin risk cap once equity drops below the value it was sized
+        against. spend_pct + equity_provider must track *current* equity."""
+        equity = {"value": 147.03}
+        s = DonchianBreakout(
+            entry_n=3, exit_n=2, spend_pct=9.0, equity_provider=lambda: equity["value"],
+        )
+        flat = close_series([100.0] * 3)
+        ctx = feed(s, flat + close_series([101.0]))
+        assert pending_sides(ctx) == ["BUY"]
+        amount = ctx._pending[0][1]
+        assert amount == pytest.approx(147.03 * 0.09)
+        assert amount < 147.03 * 0.10  # strictly under the 10% per-coin cap floor
+
 
 # --- TrendFollow ------------------------------------------------------------
 

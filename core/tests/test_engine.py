@@ -59,7 +59,7 @@ def world(tmp_path):
             journal=journal, gateway=paper, orders=orders, risk=risk,
             market=market, store=CandleStore(tmp_path / "candles"),
             symbols=["BTCUSDT"], interval="1h", entry_n=3, exit_n=3,
-            stop_loss_pct=5.0, spend_usdt=15.0, event_blackout=False,
+            stop_loss_pct=5.0, spend_pct=10.0, event_blackout=False,
             now_ms=lambda: now["ms"], **kw,
         )
 
@@ -152,7 +152,7 @@ def test_engine_warns_when_blackout_calendar_is_exhausted(world, caplog, tmp_pat
             risk=world["risk"], market=world["market"],
             store=CandleStore(tmp_path / "candles2"),
             symbols=["BTCUSDT"], interval="1h", entry_n=3, exit_n=3,
-            stop_loss_pct=5.0, spend_usdt=15.0, event_blackout=True,
+            stop_loss_pct=5.0, spend_pct=10.0, event_blackout=True,
             now_ms=lambda: beyond_calendar,
         )
     assert any("no future entries" in r.message for r in caplog.records)
@@ -168,7 +168,7 @@ def test_engine_no_warning_while_blackout_calendar_has_future_events(world, capl
             risk=world["risk"], market=world["market"],
             store=CandleStore(tmp_path / "candles3"),
             symbols=["BTCUSDT"], interval="1h", entry_n=3, exit_n=3,
-            stop_loss_pct=5.0, spend_usdt=15.0, event_blackout=True,
+            stop_loss_pct=5.0, spend_pct=10.0, event_blackout=True,
             now_ms=lambda: within_calendar,
         )
     assert not any("no future entries" in r.message for r in caplog.records)

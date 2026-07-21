@@ -91,7 +91,14 @@ class PaperConfig(BaseModel):
     entry_n: int = 15
     exit_n: int = 15
     stop_loss_pct: float = 3.0
-    spend_usdt: float = 15.0  # D-08: 10% of pilot capital per position
+    # D-08 was a fixed $15 (10% of the $150 pilot capital). Fixed-dollar sizing
+    # deadlocks against risk.max_position_pct_per_coin the moment equity dips
+    # even slightly below the original balance (incident 2026-07-21: a $2.97
+    # paper loss dropped the 10% cap to $14.70, permanently rejecting every
+    # future $15 entry since equity can't recover without a trade succeeding).
+    # spend_pct tracks *current* equity instead, 1pp under the cap floor so it
+    # can never structurally exceed it regardless of drawdown.
+    spend_pct: float = 9.0
     initial_usdt: float = 150.0  # D-05
     poll_seconds: float = Field(default=60.0, ge=5.0, le=3600.0)
     event_blackout: bool = True  # D-23 rule, kept as cheap insurance (D-26)

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from trader.backtest import Strategy, StrategyContext
 from trader.marketdata import Candle
@@ -119,19 +119,32 @@ class DonchianBreakout:
         exit_n: int = 10,
         *,
         spend_usdt: float = 15.0,
+        spend_pct: float | None = None,
+        equity_provider: Callable[[], float] | None = None,
         stop_loss_pct: float = 2.0,
         take_profit_pct: float | None = None,  # momentum runs — no cap by default
     ):
         if entry_n < 2 or exit_n < 2:
             raise ValueError("channel lengths must be >= 2")
         self.entry_n, self.exit_n = entry_n, exit_n
+        # Backtests/tuning pass a fixed spend_usdt against fixed initial capital.
+        # Live trading passes spend_pct + equity_provider so position size tracks
+        # *current* equity — keeps it proportionate to the risk cap at any equity
+        # level instead of deadlocking after a drawdown (see PaperConfig.spend_pct).
         self.spend = spend_usdt
+        self.spend_pct = spend_pct
+        self.equity_provider = equity_provider
         self.sl, self.tp = stop_loss_pct, take_profit_pct
         self._highs: deque[float] = deque(maxlen=entry_n)
         self._lows: deque[float] = deque(maxlen=exit_n)
         # Why the last signal fired (rule + numbers) — journaled by the live
         # engine for the UI trade timeline (D-23 truthful attribution).
         self.last_signal: dict | None = None
+
+    def _position_size(self) -> float:
+        if self.spend_pct is not None and self.equity_provider is not None:
+            return self.equity_provider() * self.spend_pct / 100
+        return self.spend
 
     def on_candle(self, candle: Candle, ctx: StrategyContext) -> None:
         entry_ready = len(self._highs) == self.entry_n
@@ -148,7 +161,7 @@ class DonchianBreakout:
                 "close": candle.close, "level": upper, "n": self.entry_n,
                 "candle_open_time": candle.open_time,
             }
-            ctx.buy(self.spend, stop_loss_pct=self.sl, take_profit_pct=self.tp)
+            ctx.buy(self._position_size(), stop_loss_pct=self.sl, take_profit_pct=self.tp)
         elif ctx.position.qty > 0 and lower is not None and candle.close < lower:
             self.last_signal = {
                 "rule": f"close fell below the {self.exit_n}-candle low",

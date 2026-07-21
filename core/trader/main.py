@@ -112,7 +112,7 @@ async def lifespan(app: FastAPI):
                 entry_n=config.paper.entry_n,
                 exit_n=config.paper.exit_n,
                 stop_loss_pct=config.paper.stop_loss_pct,
-                spend_usdt=config.paper.spend_usdt,
+                spend_pct=config.paper.spend_pct,
                 poll_seconds=config.paper.poll_seconds,
                 alerts=alerts,
                 event_blackout=config.paper.event_blackout,

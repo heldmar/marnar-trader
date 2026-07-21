@@ -5,7 +5,7 @@
 import { useEffect, useState } from 'react'
 import { api, ApiError, type ConfigView, type Overview, type SystemInfo } from '../api'
 import { ResumeButton } from '../components/KillSwitch'
-import { money, shortDateTime } from '../format'
+import { shortDateTime } from '../format'
 
 const RISK_FIELDS: { key: string; label: string; help: string; unit: string }[] = [
   { key: 'max_daily_loss_pct', label: 'Daily loss limit', unit: '%',
@@ -21,8 +21,8 @@ const RISK_FIELDS: { key: string; label: string; help: string; unit: string }[] 
 ]
 
 const STRATEGY_FIELDS: { key: string; label: string; help: string; unit: string }[] = [
-  { key: 'spend_usdt', label: 'Money per purchase', unit: '$',
-    help: 'How many dollars each single purchase uses.' },
+  { key: 'spend_pct', label: 'Money per purchase', unit: '%',
+    help: 'How much of the current account balance each single purchase uses.' },
   { key: 'entry_n', label: 'Buy signal lookback (days)', unit: '',
     help: 'Buy when the price breaks above its highest point of this many days.' },
   { key: 'exit_n', label: 'Sell signal lookback (days)', unit: '',
@@ -267,7 +267,7 @@ export function Settings({
           </div>
           <p className="muted small num" style={{ marginBottom: 0 }}>
             Orders in the last 24 hours: {system.orders_last_24h}. Money per purchase:{' '}
-            {money(Number(config.paper.spend_usdt), 0)}.
+            {Number(config.paper.spend_pct)}% of the account balance.
           </p>
         </div>
       )}

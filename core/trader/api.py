@@ -48,7 +48,7 @@ def require_ui_header(request: Request) -> None:
 # experiment (D-27: the clock restarts on a material strategy/risk change).
 # QA1-15: event_blackout changes what the strategy may do — it belongs here.
 CLOCK_RESETTING_FIELDS = {
-    "symbols", "interval", "entry_n", "exit_n", "stop_loss_pct", "spend_usdt",
+    "symbols", "interval", "entry_n", "exit_n", "stop_loss_pct", "spend_pct",
     "event_blackout",
 }
 
