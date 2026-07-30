@@ -102,14 +102,17 @@ class PaperConfig(BaseModel):
     interval: str = "1d"
     entry_n: int = 15
     exit_n: int = 15
-    # D-37: was 3.0. Median universe ATR is 6.76% of price, so a 3% stop fired
-    # on 85% of exits and pre-empted the channel exit that produces the entire
-    # gross profit. Fixed-choice out-of-sample over four quarters: 3% +10.4%,
-    # 10% +24.9%, 2xATR +23.9% — everything at or above 8% is inside seed noise,
-    # so the flat value wins on simplicity over the ATR estimator the advisory
-    # recommended but never swept. Evidence and caveats (the edge is heavily
-    # universe-conditional): Context/reports/stop-width-remeasure-2026-07-30.md
-    stop_loss_pct: float = 10.0
+    # D-37/D-40: briefly widened to 10.0, reverted the same day. The +14.5pp
+    # that justified widening was measured on the 20 pairs the screener picked
+    # on 2026-07-14 and then backtested over the *preceding* two years. Screened
+    # point-in-time instead — each quarter using only the data available at its
+    # start — the ranking inverts and falls monotonically with stop width:
+    # 3% +3.33%/qtr, 10% +1.50, 2xATR -0.09, no stop -1.56. Paired over 12 seeds
+    # x 8 quarters the 3% advantage is +2.33pp (t=3.22), holding in 8 of 8
+    # leave-one-quarter-out cuts. A wide stop pays only when the universe holds
+    # monster trends to ride; on an honest universe it just absorbs bigger
+    # losses. §11 of Context/reports/stop-width-remeasure-2026-07-30.md.
+    stop_loss_pct: float = 3.0
     # D-08 was a fixed $15 (10% of the $150 pilot capital). Fixed-dollar sizing
     # deadlocks against risk.max_position_pct_per_coin the moment equity dips
     # even slightly below the original balance (incident 2026-07-21: a $2.97
