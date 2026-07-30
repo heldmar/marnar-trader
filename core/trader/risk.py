@@ -211,7 +211,23 @@ class RiskManager:
         """
         previous_peak = self._journal.get_state(PEAK_KEY)
         self._journal.set_state(PEAK_KEY, None)
+        # The day anchor has to go too, for the same reason and only here. A
+        # drawdown halt force-flats at a level far below where the day opened,
+        # so a same-day resume trips the 2% daily breaker on the very next poll
+        # — RUNNING for one cycle, then halted again, which reads exactly like
+        # the bug this fixes. D-06's own cooldown is untouched: a plain
+        # daily-loss halt still runs its course and clears at the day rollover.
+        previous_anchor = None
+        if self.state != HaltState.HALTED_DAILY_LOSS:
+            previous_anchor = self._journal.get_state(DAY_ANCHOR_KEY)
+            self._journal.set_state(DAY_ANCHOR_KEY, None)
         self._set_halt(HaltState.RUNNING, f"resumed by {who}")
         self._journal.record_event(
-            "RESUMED", "risk", {"who": who, "cleared_equity_peak": previous_peak}
+            "RESUMED",
+            "risk",
+            {
+                "who": who,
+                "cleared_equity_peak": previous_peak,
+                "cleared_day_anchor": previous_anchor,
+            },
         )

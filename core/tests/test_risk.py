@@ -221,6 +221,39 @@ def test_resume_after_drawdown_is_not_a_one_way_door(risk):
     assert risk.trading_allowed()
 
 
+def test_same_day_resume_after_drawdown_is_not_re_halted_by_the_daily_breaker(risk):
+    """D-36 residual: clearing only the peak left a second door. A drawdown
+    halt force-flats far below where the day opened, so a same-day resume trips
+    the 2% daily breaker on the next poll — RUNNING for one cycle, then halted
+    again, indistinguishable from the original bug."""
+    risk.note_equity(EQUITY, now=T0)
+    risk.note_equity(Decimal("8000"), now=T0)  # -20%, and -20% on the day too
+
+    risk.resume()
+
+    assert risk.note_equity(Decimal("8000"), now=T0) is None
+    assert risk.trading_allowed()
+    # The daily breaker re-arms from the resumed level rather than vanishing.
+    assert risk.note_equity(Decimal("7900"), now=T0) is None  # -1.25%, inside
+    action = risk.note_equity(Decimal("7830"), now=T0)  # -2.1% from 8000
+    assert action is not None
+    assert action.state == HaltState.HALTED_DAILY_LOSS
+
+
+def test_resume_does_not_bypass_the_daily_loss_cooldown(risk):
+    """D-06's halt is 'for the day' and must stay that way — the day anchor is
+    cleared only when escaping a halt that force-flatted the book."""
+    risk.note_equity(EQUITY, now=T0)
+    assert risk.note_equity(Decimal("9800"), now=T0).state == HaltState.HALTED_DAILY_LOSS
+
+    risk.resume()
+
+    action = risk.note_equity(Decimal("9800"), now=T0)
+    assert action is not None
+    assert action.state == HaltState.HALTED_DAILY_LOSS  # cooldown survives
+    assert not risk.trading_allowed()
+
+
 def test_resume_re_anchors_the_peak_without_weakening_the_limit(risk):
     """D-07's 20% still bites in full — it is simply measured from the restart."""
     risk.note_equity(EQUITY, now=T0)
