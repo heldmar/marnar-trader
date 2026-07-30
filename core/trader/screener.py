@@ -5,7 +5,10 @@ Criteria applied, in order (each exclusion is counted and reported):
 1. Quote asset is USDT (D-10) and the pair is TRADING with spot enabled.
 2. Base asset is not a stablecoin/fiat (nothing to trend-trade) and not a
    leveraged token (UP/DOWN/BULL/BEAR — Binance's 3x products, not spot assets).
-3. 24h quote volume >= configured minimum (liquidity floor).
+3. 24h quote volume >= configured minimum (liquidity floor), and the 24h
+   high/low range >= configured minimum — a behavioural peg check (D-38),
+   because a token pegged to the dollar without "USD" in its name passes
+   criterion 2 and then cannot do anything but pay fees under a breakout rule.
 4. Market cap: base asset ranks within the configured top-N (CoinGecko public
    data). If CoinGecko is unreachable the screener degrades to volume-only and
    says so in the report; pairs with unknown rank are kept but flagged.
@@ -63,7 +66,8 @@ class ScreenerReport:
             "",
             f"Generated: {self.generated_at}",
             f"Criteria: quote={cfg.quote_asset}, 24h volume >= "
-            f"{cfg.min_24h_quote_volume:,.0f} USDT, market-cap rank <= "
+            f"{cfg.min_24h_quote_volume:,.0f} USDT, 24h range >= "
+            f"{cfg.min_24h_range_pct:g}%, market-cap rank <= "
             f"{cfg.max_market_cap_rank}, top {cfg.max_pairs} by volume, "
             f"minNotional fits {cfg.capital_usdt:,.0f} USDT pilot capital at 10%/coin.",
             "",
@@ -178,6 +182,17 @@ class Screener:
             volume = float(ticker["quoteVolume"])
             if volume < cfg.min_24h_quote_volume:
                 exclude(f"24h volume below {cfg.min_24h_quote_volume:,.0f} USDT")
+                continue
+            # D-38: behavioural stablecoin check. The name-based filter above
+            # cannot catch a peg that isn't called *USD*, and a pair that never
+            # moves can only pay fees under a breakout rule.
+            low = float(ticker["lowPrice"])
+            range_pct = (float(ticker["highPrice"]) / low - 1) * 100 if low > 0 else 0.0
+            if range_pct < cfg.min_24h_range_pct:
+                exclude(
+                    f"24h range {range_pct:.2f}% below {cfg.min_24h_range_pct:g}% "
+                    "(de-facto peg — nothing to trend-trade)"
+                )
                 continue
             rank = self.ranks.get(base) if self.ranks is not None else None
             if self.ranks is not None and rank is not None and rank > cfg.max_market_cap_rank:

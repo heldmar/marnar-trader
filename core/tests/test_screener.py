@@ -34,8 +34,17 @@ def symbol_info(
     }
 
 
-def ticker(symbol: str, volume: float, price: float = 100.0):
-    return {"symbol": symbol, "quoteVolume": str(volume), "lastPrice": str(price)}
+def ticker(symbol: str, volume: float, price: float = 100.0, range_pct: float = 5.0):
+    """``range_pct`` is the 24h high/low spread — the D-38 peg check. Defaults to
+    a normal, comfortably-trending 5% so existing cases exercise their own
+    criterion and not this one."""
+    return {
+        "symbol": symbol,
+        "quoteVolume": str(volume),
+        "lastPrice": str(price),
+        "lowPrice": str(price),
+        "highPrice": str(price * (1 + range_pct / 100)),
+    }
 
 
 def screen(symbols, tickers, *, ranks=None, config=None):
@@ -144,6 +153,47 @@ def test_min_notional_unaffordable_at_pilot_size_is_excluded():
     )
     assert [p.symbol for p in report.qualified] == ["BTCUSDT"]
     assert any("minNotional" in k and "D-08" in k for k in report.excluded)
+
+
+# -- D-38: behavioural peg check -----------------------------------------------------
+
+
+def test_dollar_peg_without_usd_in_its_name_is_excluded():
+    # The real case: UUSDT traded a 0.05% 24h range at ~$1.00 with $14.9M of
+    # volume and a top-64 market cap, so it passed every other criterion. It is
+    # named "U", so the `"USD" in base` filter never saw it.
+    report = screen(
+        [symbol_info("UUSDT", "U"), symbol_info("BTCUSDT", "BTC")],
+        [ticker("UUSDT", 14_900_000, price=1.0007, range_pct=0.05),
+         ticker("BTCUSDT", 2_000_000, range_pct=3.0)],
+        ranks={"U": 64, "BTC": 1},
+    )
+    assert [p.symbol for p in report.qualified] == ["BTCUSDT"]
+    assert any("de-facto peg" in k for k in report.excluded)
+
+
+def test_quiet_but_real_assets_survive_the_peg_check():
+    # Gold-backed tokens are the tightest genuine assets in the universe
+    # (XAUT/PAXG run ~2% daily). The floor must not cost us those.
+    report = screen(
+        [symbol_info("XAUTUSDT", "XAUT"), symbol_info("PAXGUSDT", "PAXG")],
+        [ticker("XAUTUSDT", 9_000_000, price=4097.0, range_pct=1.99),
+         ticker("PAXGUSDT", 8_000_000, price=4101.0, range_pct=2.05)],
+        ranks={"XAUT": 38, "PAXG": 43},
+    )
+    assert {p.symbol for p in report.qualified} == {"XAUTUSDT", "PAXGUSDT"}
+    assert report.excluded == {}
+
+
+def test_zero_low_price_does_not_divide():
+    report = screen(
+        [symbol_info("DEADUSDT", "DEAD")],
+        [{"symbol": "DEADUSDT", "quoteVolume": "9000000", "lastPrice": "0",
+          "lowPrice": "0", "highPrice": "0"}],
+        ranks={"DEAD": 50},
+    )
+    assert report.qualified == []
+    assert any("de-facto peg" in k for k in report.excluded)
 
 
 def test_max_pairs_caps_the_universe():

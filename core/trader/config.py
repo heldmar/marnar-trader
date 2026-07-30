@@ -56,6 +56,14 @@ class ScreenerConfig(BaseModel):
     quote_asset: str = "USDT"  # D-10
     min_24h_quote_volume: float = 5_000_000.0
     max_pairs: int = 20
+    # D-38: a breakout strategy needs something to break out of. UUSDT reached
+    # the live universe as a de-facto dollar peg (0.4% annualised volatility,
+    # 0.2% total range over 184 days) because the stablecoin filter matches on
+    # the *name* — "USD" in base — and the token is called "U". Screening on
+    # behaviour instead catches the whole class. 1% of the 24h high/low range
+    # separates pegs (UUSDT 0.05%) from even the quietest real assets
+    # (gold-backed XAUT/PAXG ~2%, BTC ~3%).
+    min_24h_range_pct: float = 1.0
     # D-09 market-cap criterion: base asset must rank in the top N by market cap
     # (CoinGecko). Pairs whose rank is unknown are kept but flagged in the report.
     max_market_cap_rank: int = 150
@@ -81,16 +89,27 @@ class PaperConfig(BaseModel):
     # the operational knobs (poll_seconds=0.001 would hammer Binance from the Pi).
     model_config = {"extra": "forbid"}
 
-    symbols: list[str] = [  # D-09 screener universe (screener-2026-07-14.md)
+    # D-09 screener universe (screener-2026-07-14.md), minus UUSDT — a de-facto
+    # dollar peg that reached the list through the name-based stablecoin filter
+    # (D-38). The screener now rejects its whole class behaviourally via
+    # ScreenerConfig.min_24h_range_pct.
+    symbols: list[str] = [
         "BTCUSDT", "ETHUSDT", "SXTUSDT", "SOLUSDT", "ZECUSDT", "XRPUSDT",
         "BNBUSDT", "NEARUSDT", "TRXUSDT", "WLDUSDT", "DEXEUSDT", "TAOUSDT",
-        "UUSDT", "DOGEUSDT", "UNIUSDT", "AAVEUSDT", "XAUTUSDT", "PEPEUSDT",
+        "DOGEUSDT", "UNIUSDT", "AAVEUSDT", "XAUTUSDT", "PEPEUSDT",
         "XLMUSDT", "币安人生USDT",
     ]
     interval: str = "1d"
     entry_n: int = 15
     exit_n: int = 15
-    stop_loss_pct: float = 3.0
+    # D-37: was 3.0. Median universe ATR is 6.76% of price, so a 3% stop fired
+    # on 85% of exits and pre-empted the channel exit that produces the entire
+    # gross profit. Fixed-choice out-of-sample over four quarters: 3% +10.4%,
+    # 10% +24.9%, 2xATR +23.9% — everything at or above 8% is inside seed noise,
+    # so the flat value wins on simplicity over the ATR estimator the advisory
+    # recommended but never swept. Evidence and caveats (the edge is heavily
+    # universe-conditional): Context/reports/stop-width-remeasure-2026-07-30.md
+    stop_loss_pct: float = 10.0
     # D-08 was a fixed $15 (10% of the $150 pilot capital). Fixed-dollar sizing
     # deadlocks against risk.max_position_pct_per_coin the moment equity dips
     # even slightly below the original balance (incident 2026-07-21: a $2.97
