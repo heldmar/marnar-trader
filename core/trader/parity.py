@@ -93,6 +93,7 @@ class PortfolioReplay:
         max_open_positions: int = 5,
         max_position_pct: float = 10.0,
         spend_usdt: float = 15.0,
+        spend_pct: float | None = None,
         entry_n: int = 15,
         exit_n: int = 15,
         stop_loss_pct: float = 3.0,
@@ -105,11 +106,23 @@ class PortfolioReplay:
         self.max_pos = max_open_positions
         self.max_pct = max_position_pct
         self.spend = spend_usdt
+        self.spend_pct = spend_pct
         events = list(all_event_times_ms()) if event_blackout else []
 
         def make():
+            # Parity compares the replay against a *live* paper account, so the
+            # replay has to size positions the way live does. Live passes
+            # spend_pct + an equity provider (5ce513e); a fixed spend_usdt would
+            # drift apart from it the moment equity moves, which is precisely
+            # the regime parity exists to measure. Backtest/tuning callers keep
+            # the fixed-dollar form against fixed initial capital.
             inner = DonchianBreakout(
-                entry_n, exit_n, spend_usdt=spend_usdt, stop_loss_pct=stop_loss_pct
+                entry_n,
+                exit_n,
+                spend_usdt=spend_usdt,
+                spend_pct=spend_pct,
+                equity_provider=(None if spend_pct is None else self._equity_cost_basis),
+                stop_loss_pct=stop_loss_pct,
             )
             return EventBlackout(inner, events) if events else inner
 
@@ -163,6 +176,11 @@ class PortfolioReplay:
         )
         self.result.final_equity = equity
         return self.result
+
+    def _equity_cost_basis(self) -> float:
+        """Equity marked at cost — the same conservative mark ``_buy`` uses for
+        the per-coin cap, so sizing and the cap agree on what equity is."""
+        return self.cash + sum(p.cost for p in self.positions.values())
 
     def _equity_mark(self, marks: dict[str, float]) -> float:
         return self.cash + sum(p.qty * marks.get(s, 0.0) for s, p in self.positions.items())
@@ -361,7 +379,7 @@ def main() -> int:
         slippage_bps=config.backtest.slippage_bps,
         max_open_positions=config.risk.max_open_positions,
         max_position_pct=config.risk.max_position_pct_per_coin,
-        spend_usdt=p.spend_usdt,
+        spend_pct=p.spend_pct,
         entry_n=p.entry_n,
         exit_n=p.exit_n,
         stop_loss_pct=p.stop_loss_pct,

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from trader.marketdata import INTERVAL_MS, Candle, CandleStore
 from trader.parity import PortfolioReplay, paper_stats, render_report
 
@@ -39,6 +41,38 @@ def test_replay_enforces_max_open_positions():
     )
     assert res.buys == 1
     assert res.skipped_position_cap >= 1
+
+
+def test_replay_sizes_from_paper_config_fields():
+    """D-39: parity built its replay from ``PaperConfig.spend_usdt``, a field
+    removed in 5ce513e — under ``extra="forbid"`` it could not come back, so
+    the Q13 gate tool raised AttributeError before doing any work. Parity must
+    only ever reach for fields PaperConfig actually has."""
+    from trader.config import PaperConfig
+
+    p = PaperConfig()
+    assert not hasattr(p, "spend_usdt")
+    replay = PortfolioReplay(
+        entry_n=3, exit_n=3, spend_pct=p.spend_pct,
+        initial_cash=p.initial_usdt, event_blackout=False,
+    )
+    res = replay.run({"AAAUSDT": breakout_series()}, trade_from_ms=T0)
+    assert res.buys == 1
+    # 9% of equity, not the old fixed $15 — sizing tracks equity as live does.
+    assert res.final_equity != res.initial_cash
+
+
+def test_replay_percentage_sizing_tracks_equity_not_a_fixed_dollar_amount():
+    series = breakout_series()
+    small = PortfolioReplay(
+        entry_n=3, exit_n=3, spend_pct=9.0, initial_cash=150.0, event_blackout=False
+    ).run({"AAAUSDT": series}, trade_from_ms=T0)
+    large = PortfolioReplay(
+        entry_n=3, exit_n=3, spend_pct=9.0, initial_cash=1500.0, event_blackout=False
+    ).run({"AAAUSDT": series}, trade_from_ms=T0)
+    # Ten times the capital must buy ten times the position; a fixed-dollar
+    # spend would have bought the same notional in both runs.
+    assert large.fees == pytest.approx(small.fees * 10, rel=1e-6)
 
 
 def test_replay_gates_entries_before_window():

@@ -202,6 +202,45 @@ def test_resume_restores_trading(risk):
     assert risk.status()["reason"] == "resumed by investor"
 
 
+def test_resume_after_drawdown_is_not_a_one_way_door(risk):
+    """D-36: the halt force-flats every position, so equity cannot recover
+    without trading. If resume() left the high-water mark alone, the very next
+    poll re-computed the same breach and re-halted — permanently."""
+    risk.note_equity(EQUITY, now=T0)
+    assert risk.note_equity(Decimal("8000"), now=T0).state == HaltState.HALTED_DRAWDOWN
+
+    risk.resume()
+
+    # The investor resumes the next day; nothing has recovered, equity is as
+    # the halt left it. Pre-D-36 this re-halted on the spot.
+    day2 = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+    assert risk.note_equity(Decimal("8000"), now=day2) is None
+    assert risk.trading_allowed()
+    # ...and stays open on the following poll — one quiet poll proves nothing.
+    assert risk.note_equity(Decimal("8000"), now=day2) is None
+    assert risk.trading_allowed()
+
+
+def test_resume_re_anchors_the_peak_without_weakening_the_limit(risk):
+    """D-07's 20% still bites in full — it is simply measured from the restart."""
+    risk.note_equity(EQUITY, now=T0)
+    risk.note_equity(Decimal("8000"), now=T0)
+    assert risk.status()["equity_peak"] == "10000"
+
+    risk.resume()
+    assert risk.status()["equity_peak"] is None  # cleared, awaiting the next poll
+
+    day2 = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+    risk.note_equity(Decimal("8000"), now=day2)
+    assert risk.status()["equity_peak"] == "8000"  # re-anchored to live equity
+
+    day3 = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
+    action = risk.note_equity(Decimal("6400"), now=day3)  # -20.0% from 8000
+    assert action is not None
+    assert action.state == HaltState.HALTED_DRAWDOWN  # outranks the daily breaker
+    assert action.force_flat is True
+
+
 # -- R-02 acceptance: runaway strategy fixture ----------------------------------------
 
 

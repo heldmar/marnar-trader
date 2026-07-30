@@ -197,6 +197,21 @@ class RiskManager:
         return HaltAction(HaltState.HALTED_MANUAL, reason, force_flat=close_positions)
 
     def resume(self, who: str = "investor") -> None:
-        """Manual reactivation (required after drawdown/manual halts, D-07)."""
+        """Manual reactivation (required after drawdown/manual halts, D-07).
+
+        D-36: dropping the high-water mark is what makes the resume real. The
+        peak only ratchets upward, and a drawdown halt force-flats every
+        position (D-21) — so resuming without clearing it re-computes the same
+        breach on the very next poll and halts again, forever. Equity can only
+        climb by trading, and trading is precisely what the halt forbids.
+        Clearing it re-anchors to live equity on the next poll (see the
+        ``peak is None`` branch in halt_and_apply), so the 20% limit still
+        applies in full — measured from the restart rather than from a peak no
+        operator action could ever clear.
+        """
+        previous_peak = self._journal.get_state(PEAK_KEY)
+        self._journal.set_state(PEAK_KEY, None)
         self._set_halt(HaltState.RUNNING, f"resumed by {who}")
-        self._journal.record_event("RESUMED", "risk", {"who": who})
+        self._journal.record_event(
+            "RESUMED", "risk", {"who": who, "cleared_equity_peak": previous_peak}
+        )
