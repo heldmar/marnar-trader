@@ -241,3 +241,20 @@ def test_get_state_survives_concurrent_writes(tmp_path):
         t.join()
     assert errors == []
     j.close()
+
+
+def test_paper_clock_accessors_use_the_journal_ts_format(tmp_path):
+    """The clock is stamped in epoch ms but every history table is keyed by ISO
+    text, and the stat filters compare those as *strings* — so the converted
+    form has to match utcnow()'s format exactly or the comparisons silently
+    stop matching."""
+    j = make_journal(tmp_path)
+    assert j.paper_started_iso() == ""  # unstarted: no lower bound at all
+    assert j.paper_baseline_equity() is None
+
+    j.set_state("engine:paper_started_at", 1_784_315_690_368)
+    assert j.paper_started_iso() == "2026-07-17T19:14:50.368+00:00"
+
+    j.set_state("engine:paper_initial_equity", "147.0297427193")
+    assert j.paper_baseline_equity() == Decimal("147.0297427193")
+    j.close()

@@ -3,6 +3,7 @@ config editor (only-tighten risk, D-27 clock-reset acknowledgment)."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -253,3 +254,50 @@ def test_timeline_tolerates_malformed_timestamp_rows(client):
     assert resp.status_code == 200
     trade = next(i for i in resp.json() if i["type"] == "trade")
     assert trade["news_context"] == []  # no context, but the row renders
+
+
+def test_overview_stats_start_at_the_paper_clock_not_at_all_history(client):
+    """D-27/D-34: a clock reset re-baselines the run, so the previous run's
+    history must not be reported as this one's track record.
+
+    This is the bug that made 68 churn round trips from a since-fixed
+    concurrency defect show up as "70 finished trades, 0 won" long after the
+    reset that was supposed to retire them.
+    """
+    j = client.journal
+    j.record_equity_snapshot("150.0", "2026-07-16T00:00:00.000+00:00")
+    _record_trade(j, "BUY", "50000")
+    _record_trade(j, "SELL", "49000")  # closes the position -> pnl_ledger row
+    j.set_state("engine:paper_initial_equity", "147.03")
+
+    # Clock starts *after* all of the above: that history belongs to the
+    # previous run and none of it may surface.
+    ahead_ms = int(datetime.now(UTC).timestamp() * 1000) + 60_000
+    j.set_state("engine:paper_started_at", ahead_ms)
+
+    data = client.http.get("/api/overview").json()
+    assert data["closed_trades"] == 0
+    assert data["winning_trades"] == 0
+    assert data["trade_results"] == []
+    assert data["equity_series"] == []
+    assert data["fees_usdt"] == 0.0
+    # ...and P&L is measured from the reset baseline, not config's initial_usdt.
+    assert data["initial_usdt"] == pytest.approx(147.03)
+    assert data["total_pnl_usdt"] == pytest.approx(152.5 - 147.03)
+
+    # Move the boundary back behind that history and the very same rows count.
+    j.set_state("engine:paper_started_at", 1_700_000_000_000)
+    data = client.http.get("/api/overview").json()
+    assert data["closed_trades"] == 1
+    assert len(data["trade_results"]) == 1
+    assert data["equity_series"] == [{"ts": "2026-07-16T00:00:00.000+00:00", "equity": 150.0}]
+    assert data["fees_usdt"] == pytest.approx(0.02)  # entry + exit fee
+
+
+def test_overview_falls_back_to_configured_balance_before_any_reset(client):
+    """No reset yet means no journal baseline — the configured starting money
+    is still the honest starting point."""
+    client.journal.set_state("engine:paper_started_at", 1_700_000_000_000)
+    data = client.http.get("/api/overview").json()
+    assert data["initial_usdt"] == pytest.approx(150.0)
+    assert data["total_pnl_usdt"] == pytest.approx(2.5)

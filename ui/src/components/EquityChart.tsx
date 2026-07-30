@@ -6,7 +6,13 @@ import { money, shortDate } from '../format'
 
 const W = 640
 const H = 180
-const PAD = { top: 12, right: 8, bottom: 22, left: 8 }
+const PAD = { top: 12, right: 8, bottom: 22, left: 46 }
+
+// Scaling to the data alone made every decline fill the chart, so a -2.5% run
+// looked identical to a -50% one. This audience reads shape before numbers
+// (UI-12) and P&L has to be legible (UI-14), so hold the window at no less
+// than +/- this fraction of the starting money: small moves then render small.
+const MIN_HALF_SPAN = 0.025
 
 export function EquityChart({ series, initial }: { series: EquityPoint[]; initial: number }) {
   if (series.length < 2) {
@@ -20,8 +26,9 @@ export function EquityChart({ series, initial }: { series: EquityPoint[]; initia
   const t0 = new Date(series[0].ts).getTime()
   const t1 = new Date(series[series.length - 1].ts).getTime()
   const values = series.map((p) => p.equity)
-  const lo = Math.min(...values, initial)
-  const hi = Math.max(...values, initial)
+  const margin = initial * MIN_HALF_SPAN
+  const lo = Math.min(...values, initial - margin)
+  const hi = Math.max(...values, initial + margin)
   const span = hi - lo || 1
 
   const x = (ts: string) =>
@@ -39,6 +46,12 @@ export function EquityChart({ series, initial }: { series: EquityPoint[]; initia
     <div>
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img"
            aria-label={`Account value over time, now ${money(last.equity)}`}>
+        {/* y scale: without these the shape above carries no sense of size */}
+        {[hi, lo].map((v) => (
+          <text key={v} x={PAD.left - 6} y={y(v) + 4} fontSize="11" fill="#6c756c" textAnchor="end">
+            {money(v, 0)}
+          </text>
+        ))}
         {/* dashed line = where the money started */}
         <line x1={PAD.left} x2={W - PAD.right} y1={baseline} y2={baseline}
               stroke="#b9b3a4" strokeDasharray="5 4" strokeWidth="1" />

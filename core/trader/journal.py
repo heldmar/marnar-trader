@@ -156,6 +156,11 @@ def utcnow() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
+def iso_from_epoch_ms(ms: int | float) -> str:
+    """Epoch milliseconds -> the journal's ts format, for string comparisons."""
+    return datetime.fromtimestamp(ms / 1000, tz=UTC).isoformat(timespec="milliseconds")
+
+
 def make_intent_id(
     symbol: str, side: str, order_type: str, quantity: str, price: str | None, nonce: str
 ) -> str:
@@ -410,6 +415,30 @@ class Journal:
                 (key, json.dumps(value, default=str), utcnow()),
             )
 
+    # -- paper clock (D-27/D-34) -----------------------------------------------
+    # A clock reset re-baselines the track record: history before the reset
+    # belongs to the *previous* run and must not leak into current stats. These
+    # two accessors are the single source of truth for that boundary — callers
+    # summarising performance filter by them rather than re-deriving the keys.
+
+    def paper_started_iso(self) -> str:
+        """Clock start in journal ts format; "" (= no lower bound) if unstarted.
+
+        The engine stamps this as epoch ms, but every history table is keyed by
+        ISO text, so stat queries need the converted form.
+        """
+        ms = self.get_state("engine:paper_started_at")
+        return "" if ms is None else iso_from_epoch_ms(ms)
+
+    def paper_baseline_equity(self) -> Decimal | None:
+        """Equity the current clock started from, or None when never reset.
+
+        None means "no reset has happened" — callers fall back to the
+        configured initial balance, which is still the true starting point.
+        """
+        value = self.get_state("engine:paper_initial_equity")
+        return None if value is None else Decimal(str(value))
+
     # -- news (D-23a: context only, no strategy reads this) --------------------
 
     def record_news_item(
@@ -636,12 +665,14 @@ class Journal:
                 (ts_iso,),
             ).fetchall()
 
-    def fees_total(self) -> Decimal:
+    def fees_total(self, since_iso: str = "") -> Decimal:
         # QA1-17: money aggregation in Decimal, not IEEE floats — row counts
         # are small (one per fill) and the schema stores exact decimal strings.
         with self._lock:
             rows = self._conn.execute(
-                "SELECT fee FROM fills WHERE fee_asset = 'USDT' OR fee_asset IS NULL"
+                "SELECT fee FROM fills WHERE (fee_asset = 'USDT' OR fee_asset IS NULL)"
+                " AND executed_at >= ?",
+                (since_iso,),
             ).fetchall()
         return sum((Decimal(r["fee"]) for r in rows), Decimal("0"))
 

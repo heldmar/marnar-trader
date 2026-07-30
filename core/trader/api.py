@@ -83,7 +83,13 @@ async def overview(request: Request) -> dict:
     """Top onion layer (UI-13): how is it going — visual-first payload."""
     state = request.app.state
     journal, config = state.journal, state.config
-    initial = Decimal(str(config.paper.initial_usdt))
+    # D-27/D-34: a clock reset re-baselines the run, so every figure below is
+    # measured from that boundary. Without this the previous run's history —
+    # including whatever incident prompted the reset — is reported as this
+    # run's track record, which is exactly backwards.
+    since = journal.paper_started_iso()
+    baseline = journal.paper_baseline_equity()
+    initial = baseline if baseline is not None else Decimal(str(config.paper.initial_usdt))
 
     positions = journal.positions()
     equity: Decimal | None = None
@@ -99,7 +105,7 @@ async def overview(request: Request) -> dict:
     if equity is not None and anchor.get("equity"):
         today_pnl = float(equity - Decimal(anchor["equity"]))
 
-    pnl_rows = journal.pnl_entries_since("")
+    pnl_rows = journal.pnl_entries_since(since)
     wins = [r for r in pnl_rows if Decimal(r["realized_pnl"]) > 0]
 
     started = journal.get_state("engine:paper_started_at")
@@ -117,7 +123,7 @@ async def overview(request: Request) -> dict:
         # QA1-20: the snapshot series grows one point / 15 min forever — cap the
         # payload by stride-sampling down to ~500 points (always keep the last).
         "equity_series": _downsample(
-            [{"ts": r["ts"], "equity": float(r["equity"])} for r in journal.equity_series()]
+            [{"ts": r["ts"], "equity": float(r["equity"])} for r in journal.equity_series(since)]
         ),
         "trade_results": [  # win/loss bars (UI-15): one bar per closed trade
             {"ts": r["ts"], "symbol": r["symbol"], "pnl": float(r["realized_pnl"])}
@@ -125,7 +131,7 @@ async def overview(request: Request) -> dict:
         ],
         "closed_trades": len(pnl_rows),
         "winning_trades": len(wins),
-        "fees_usdt": float(journal.fees_total()),
+        "fees_usdt": float(journal.fees_total(since)),
     }
 
 

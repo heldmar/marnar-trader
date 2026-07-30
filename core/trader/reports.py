@@ -156,9 +156,17 @@ class ReportBuilder:
 
     def _equity_at(self, ts_iso: str) -> float:
         """Mark-to-market equity at *ts_iso*: the latest snapshot at or before
-        it; before the first snapshot ever, the configured starting money."""
+        it; before the first snapshot ever, the money this run started with.
+
+        D-27/D-34: after a clock reset that starting point is the reset
+        baseline, not the originally configured balance — a report for the
+        reset day would otherwise open against the wrong number.
+        """
         row = self.journal.equity_at(ts_iso)
-        return float(row["equity"]) if row else self.initial_equity
+        if row:
+            return float(row["equity"])
+        baseline = self.journal.paper_baseline_equity()
+        return float(baseline) if baseline is not None else self.initial_equity
 
     def _events_between(self, kinds: list[str], lo: str, hi: str) -> list[dict]:
         return [
