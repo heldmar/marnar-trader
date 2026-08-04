@@ -143,6 +143,9 @@ class PaperEngine:
             )
             return EventBlackout(inner, events) if events else inner
 
+        # Kept so rotation can build a strategy for a symbol that arrives later
+        # with exactly the parameters the engine booted with.
+        self._make_strategy = make_strategy
         self.strategies = {s: make_strategy() for s in self.symbols}
         self._started = False
         # Symbols whose warmup failed: primed with nothing, so parked out of
@@ -297,6 +300,33 @@ class PaperEngine:
                 f"orders, closed {len(result['closed_positions'])} positions. "
                 "Manual /api/resume required."
             )
+
+    def set_symbols(self, symbols: list[str]) -> dict[str, list[str]]:
+        """Swap the traded universe without a restart (D-09 rotation).
+
+        A symbol we still hold is never dropped, whatever the screen says: the
+        engine is the only thing that can produce its exit, so removing it would
+        strand the position with no stop and no sell rule. It stays until it is
+        flat, and the next rotation drops it then.
+
+        New symbols enter unwarmed and are primed by the next poll, so a
+        rotation can never make the engine act on an unprimed channel.
+        """
+        wanted = list(dict.fromkeys(symbols))
+        held = [s for s in self.symbols if s not in wanted and self._position_qty(s) > 0]
+        final = wanted + held
+
+        added = [s for s in final if s not in self.symbols]
+        removed = [s for s in self.symbols if s not in final]
+        for symbol in added:
+            self.strategies[symbol] = self._make_strategy()
+            self._unwarmed.add(symbol)
+        for symbol in removed:
+            self.strategies.pop(symbol, None)
+            self._unwarmed.discard(symbol)
+            self.journal.set_state(PROTECT_KEY.format(symbol=symbol), None)
+        self.symbols = final
+        return {"added": added, "removed": removed, "kept_for_open_position": held}
 
     def _retry_unwarmed(self) -> None:
         """Give symbols that missed warmup another chance, once per poll. A pair

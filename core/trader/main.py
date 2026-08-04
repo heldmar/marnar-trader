@@ -120,6 +120,18 @@ async def lifespan(app: FastAPI):
             )
             app.state.engine = engine
             tasks.append(asyncio.create_task(engine.run(), name="paper-engine"))
+            if config.paper.rotate_universe:
+                from trader.rotation import UniverseRotator
+
+                tasks.append(
+                    asyncio.create_task(
+                        UniverseRotator(
+                            app.state.journal, app.state, BinancePublicData(),
+                            config_path=CONFIG_PATH, alerts=alerts,
+                        ).run(every_seconds=config.paper.rotate_seconds),
+                        name="universe-rotation",
+                    )
+                )
         else:
             log.error("paper engine NOT started: reconciliation was not clean")
             # QA2-01: the locked state must be loud, not just a log line.

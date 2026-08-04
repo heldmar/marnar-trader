@@ -273,3 +273,50 @@ def test_total_warmup_failure_is_still_fatal(world, tmp_path):
     with pytest.raises(RuntimeError, match="all 1 symbols"):
         eng.start()
     assert not eng._started
+
+
+# -- hot universe swap (D-09 rotation) --------------------------------------------
+
+
+def test_set_symbols_adds_new_pairs_unwarmed(world):
+    """A rotated-in pair must not trade on an unprimed channel — it enters
+    unwarmed and the next poll primes it."""
+    eng = world["engine"]()
+    eng.start()
+    change = eng.set_symbols(["BTCUSDT", "ETHUSDT"])
+    assert change["added"] == ["ETHUSDT"]
+    assert "ETHUSDT" in eng._unwarmed
+    assert "ETHUSDT" in eng.strategies
+
+
+def test_set_symbols_drops_pairs_we_do_not_hold(world):
+    eng = world["engine"]()
+    eng.start()
+    change = eng.set_symbols(["ETHUSDT"])
+    assert change["removed"] == ["BTCUSDT"]
+    assert "BTCUSDT" not in eng.strategies
+    assert world["journal"].get_state("engine:protect:BTCUSDT") is None
+
+
+def test_set_symbols_keeps_a_pair_we_still_hold(world):
+    """Dropping it would strand the position: no exit rule, no protective stop,
+    nothing left to sell it."""
+    eng = world["engine"]()
+    eng.start()
+    world["now"]["ms"] = T0 + 11 * H
+    eng.poll_once()  # opens BTCUSDT
+    assert world["journal"].positions()
+
+    change = eng.set_symbols(["ETHUSDT"])
+    assert change["kept_for_open_position"] == ["BTCUSDT"]
+    assert "BTCUSDT" in eng.symbols
+    assert "BTCUSDT" in eng.strategies
+    assert world["journal"].get_state("engine:protect:BTCUSDT") is not None
+
+
+def test_set_symbols_is_idempotent(world):
+    eng = world["engine"]()
+    eng.start()
+    change = eng.set_symbols(["BTCUSDT", "BTCUSDT"])
+    assert eng.symbols == ["BTCUSDT"]
+    assert change == {"added": [], "removed": [], "kept_for_open_position": []}

@@ -125,6 +125,13 @@ class PaperConfig(BaseModel):
     poll_seconds: float = Field(default=60.0, ge=5.0, le=3600.0)
     event_blackout: bool = True  # D-23 rule, kept as cheap insurance (D-26)
     news_ingest_seconds: float = Field(default=900.0, ge=60.0)  # D-23a headline cycle
+    # D-09 screener-driven rotation. Off by default: switching it on changes the
+    # book the paper gate is measuring, so it is a deliberate act. Note it is
+    # NOT in CLOCK_RESETTING_FIELDS — the rotations it performs are exempt
+    # (D-42a), and a gate that restarted on every rotation could never be
+    # reached. Weekly, so the three-week gate actually exercises the machinery.
+    rotate_universe: bool = False
+    rotate_seconds: float = Field(default=7 * 24 * 3600.0, ge=3600.0)
     report_check_seconds: float = Field(default=300.0, ge=30.0)  # S7 report catch-up cycle
 
 
