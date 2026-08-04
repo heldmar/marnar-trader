@@ -182,6 +182,7 @@ class PeriodResult:
     buys: int
     sells: int
     fees: float
+    rank_criterion_applied: bool = False
 
     @property
     def return_pct(self) -> float:
@@ -250,6 +251,14 @@ def run_point_in_time(
     entry_n: int = 15,
     exit_n: int = 15,
     stop_loss_pct: float = 3.0,
+    # Percentage-of-equity sizing, as production does it (PaperConfig.spend_pct).
+    # A fixed dollar spend is not merely a different choice here, it is broken:
+    # $15 against a 10%-of-equity cap blocks every entry after the first fee
+    # drops equity below $150 — the same structural deadlock that froze live
+    # trading in the 2026-07-21 incident. Measured on this universe it produced
+    # 1 trade in 8 quarters, so a fixed-dollar harness would have "measured"
+    # stop widths that no trade ever reached.
+    spend_pct: float = 9.0,
     spend_usdt: float = 15.0,
     max_open_positions: int = 5,
     max_position_pct: float = 10.0,
@@ -274,13 +283,6 @@ def run_point_in_time(
     step = INTERVAL_MS[interval]
     warmup_ms = max(entry_n, exit_n) * step * 2  # generous lead-in so channels are primed
     result = PitResult(initial_cash=initial_cash)
-    if market_cap_ranks_at is None:
-        result.notes.append(
-            "market-cap criterion NOT applied — no historical rank source (D-43b). "
-            "Production screens on top-"
-            f"{config.max_market_cap_rank} market cap, so this universe is wider "
-            "than production's and the divergence is unquantified."
-        )
 
     equity = initial_cash
     for i in range(periods):
@@ -312,6 +314,7 @@ def run_point_in_time(
             max_open_positions=max_open_positions,
             max_position_pct=max_position_pct,
             spend_usdt=spend_usdt,
+            spend_pct=spend_pct,
             entry_n=entry_n,
             exit_n=exit_n,
             stop_loss_pct=stop_loss_pct,
@@ -330,9 +333,21 @@ def run_point_in_time(
                 buys=portfolio.buys,
                 sells=portfolio.sells,
                 fees=portfolio.fees,
+                rank_criterion_applied=ranks is not None,
             )
         )
         equity = portfolio.final_equity
+
+    # D-43(b): the divergence from production is never allowed to go silent.
+    applied = sum(1 for p in result.periods if p.rank_criterion_applied)
+    if applied < len(result.periods):
+        result.notes.append(
+            f"market-cap criterion applied to {applied} of {len(result.periods)} periods. "
+            f"Production screens on top-{config.max_market_cap_rank} market cap; where "
+            "no historical rank was available the screen ran on volume and range alone, "
+            "so that part of the universe is wider than production's and the divergence "
+            "is unquantified (free rank sources reach back ~1 year)."
+        )
 
     return result
 
@@ -388,6 +403,11 @@ def main() -> int:
     parser.add_argument("--exit-n", type=int, default=15)
     parser.add_argument("--stop", type=float, default=3.0, help="stop %%; 0 disables the stop")
     parser.add_argument("--capital", type=float, default=150.0)
+    parser.add_argument(
+        "--ranks",
+        default=None,
+        help="path to marketcap-ranks.json (trader.marketcap); omit to skip the criterion",
+    )
     args = parser.parse_args()
 
     config = load_config()
@@ -421,6 +441,18 @@ def main() -> int:
     span = args.periods * args.period_days * DAY_MS
     start_ms = newest - span
 
+    ranks_at_date = None
+    if args.ranks:
+        from trader.marketcap import RankHistory
+
+        history = RankHistory(Path(args.ranks))
+        dates = [start_ms + i * args.period_days * DAY_MS for i in range(args.periods)]
+        ranks_at_date = history.for_dates(dates)
+        print(
+            f"market-cap ranks cover {len(ranks_at_date)} of {args.periods} screening dates "
+            f"(free tier reaches back ~1 year — D-43b)"
+        )
+
     result = run_point_in_time(
         series,
         start_ms=start_ms,
@@ -431,6 +463,7 @@ def main() -> int:
         entry_n=args.entry_n,
         exit_n=args.exit_n,
         stop_loss_pct=args.stop,
+        market_cap_ranks_at=ranks_at_date,
     )
     print()
     print(

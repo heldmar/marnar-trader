@@ -285,7 +285,33 @@ def test_missing_rank_source_is_recorded_as_a_note():
     result = run_point_in_time(
         series, start_ms=100 * DAY_MS, periods=2, config=CFG, initial_cash=150.0
     )
-    assert any("market-cap criterion NOT applied" in n for n in result.notes)
+    assert any("applied to 0 of 2 periods" in n for n in result.notes)
+    assert not any(p.rank_criterion_applied for p in result.periods)
+
+
+def test_partial_rank_coverage_is_reported_honestly():
+    """The expected state on the free tier: ranks reach back about a year, so
+    later periods get the criterion and earlier ones do not. Claiming full
+    coverage would be the exact dishonesty this harness exists to remove."""
+    series = {
+        "AUSDT": make_candles(400, quote_volume=9_000_000.0, drift=0.002),
+        "BUSDT": make_candles(400, quote_volume=8_000_000.0, drift=0.001),
+    }
+    start = 100 * DAY_MS
+    # Ranks known only for the final period; B is ranked out of the top 100.
+    last_period_start = start + 2 * 91 * DAY_MS
+    result = run_point_in_time(
+        series,
+        start_ms=start,
+        periods=3,
+        config=CFG,
+        initial_cash=150.0,
+        market_cap_ranks_at={last_period_start: {"A": 1, "B": 900}},
+    )
+    assert [p.rank_criterion_applied for p in result.periods] == [False, False, True]
+    assert "BUSDT" in result.periods[0].symbols
+    assert "BUSDT" not in result.periods[2].symbols
+    assert any("applied to 1 of 3 periods" in n for n in result.notes)
 
 
 def test_turnover_counts_arrivals_between_screens():
@@ -370,3 +396,29 @@ def test_universe_symbols_filters_quote_status_and_asset_class():
         ]
     }
     assert universe_symbols(info, CFG) == ["BTCUSDT"]
+
+
+def test_sizing_tracks_equity_so_the_cap_cannot_deadlock():
+    """Regression for the harness's own version of the 2026-07-21 incident: a
+    fixed $15 spend against a 10%-of-equity cap blocks every entry after the
+    first fee, so the replay silently stops trading and every comparison built
+    on it becomes vacuous. Percentage sizing must keep trading."""
+    series = {
+        f"{c}USDT": make_trending_series(quote_volume=9_000_000.0 - i * 1000)
+        for i, c in enumerate("ABCDE")
+    }
+    live_sizing = run_point_in_time(
+        series, start_ms=100 * DAY_MS, periods=3, config=CFG, initial_cash=150.0
+    )
+    fixed_dollar = run_point_in_time(
+        series,
+        start_ms=100 * DAY_MS,
+        periods=3,
+        config=CFG,
+        initial_cash=150.0,
+        spend_pct=None,
+        spend_usdt=15.0,
+    )
+    assert sum(p.buys for p in live_sizing.periods) > sum(p.buys for p in fixed_dollar.periods)
+    # Trading must not stop after the opening period.
+    assert all(p.buys > 0 for p in live_sizing.periods)
