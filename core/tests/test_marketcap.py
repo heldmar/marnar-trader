@@ -10,7 +10,14 @@ from __future__ import annotations
 
 import json
 
-from trader.marketcap import DAY_MS, RankHistory, build_rank_history, ranks_at
+from trader.marketcap import (
+    DAY_MS,
+    RankHistory,
+    build_rank_history,
+    load_raw,
+    ranks_at,
+    save_raw,
+)
 
 
 def series(*pairs: tuple[int, float]) -> list[tuple[int, float]]:
@@ -115,3 +122,47 @@ def test_save_is_atomic_leaving_no_tmp_file(tmp_path):
     assert path.exists()
     assert not list(tmp_path.glob("*.tmp"))
     assert json.loads(path.read_text())["ranks"] == {"0": {"A": 1}}
+
+
+# -- raw checkpoint: the sweep costs hours, so stopping must not cost the whole run
+
+
+def test_missing_checkpoint_returns_empty_rather_than_raising(tmp_path):
+    assert load_raw(tmp_path / "absent.json") == ({}, {})
+
+
+def test_checkpoint_roundtrips_with_int_and_float_types_intact(tmp_path):
+    path = tmp_path / "raw.json"
+    save_raw(path, {"bitcoin": [(DAY_MS, 1.5e12)]}, {"bitcoin": "BTC"})
+    histories, symbol_of = load_raw(path)
+    assert symbol_of == {"bitcoin": "BTC"}
+    # JSON has no int/float distinction; ranks are keyed by int day, so a
+    # reloaded timestamp that came back as a float would miss every lookup.
+    (ts, cap), = histories["bitcoin"]
+    assert isinstance(ts, int) and ts == DAY_MS
+    assert cap == 1.5e12
+
+
+def test_corrupt_checkpoint_is_discarded_not_fatal(tmp_path):
+    path = tmp_path / "raw.json"
+    path.write_text('{"histories": {"bitcoin": [[1, 2.0')  # truncated mid-write
+    assert load_raw(path) == ({}, {})
+
+
+def test_checkpoint_write_is_atomic(tmp_path):
+    path = tmp_path / "raw.json"
+    save_raw(path, {"a": [(0, 1.0)]}, {"a": "A"})
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_reloaded_checkpoint_feeds_build_rank_history(tmp_path):
+    """The point of the checkpoint: a resumed sweep must produce the same ranks
+    as an uninterrupted one, not merely reload without error."""
+    histories = {"a": [(0, 3.0)], "b": [(0, 9.0)]}
+    symbol_of = {"a": "A", "b": "B"}
+    path = tmp_path / "raw.json"
+    save_raw(path, histories, symbol_of)
+    reloaded, reloaded_symbols = load_raw(path)
+    assert build_rank_history(reloaded, symbol_of=reloaded_symbols) == build_rank_history(
+        histories, symbol_of=symbol_of
+    )

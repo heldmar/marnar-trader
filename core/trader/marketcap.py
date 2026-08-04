@@ -207,6 +207,39 @@ def fetch_cap_history(
     raise last_exc  # type: ignore[misc]
 
 
+def load_raw(path: Path) -> tuple[dict[str, list[tuple[int, float]]], dict[str, str]]:
+    """Previously fetched cap series, or empty pair when there is no checkpoint.
+
+    A corrupt or truncated checkpoint is discarded rather than raised on: it is
+    a cache, and refetching is merely slow, whereas failing to start is fatal.
+    """
+    if not path.exists():
+        return {}, {}
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError):
+        log.warning("discarding unreadable cap checkpoint at %s", path)
+        return {}, {}
+    histories = {
+        coin_id: [(int(ts), float(cap)) for ts, cap in series]
+        for coin_id, series in payload.get("histories", {}).items()
+    }
+    return histories, dict(payload.get("symbol_of", {}))
+
+
+def save_raw(
+    path: Path,
+    histories: dict[str, list[tuple[int, float]]],
+    symbol_of: dict[str, str],
+) -> None:
+    """Checkpoint the raw series. Written via a temp file and rename so an
+    interrupt mid-write cannot leave a half-file where the next run expects one."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"symbol_of": symbol_of, "histories": histories}))
+    tmp.replace(path)
+
+
 def main() -> int:
     """CLI: build/refresh the cached rank history."""
     import argparse
@@ -218,24 +251,41 @@ def main() -> int:
     args = parser.parse_args()
 
     out = Path(args.data_dir) / "marketcap-ranks.json"
-    print(f"Fetching top {args.pages * 250} coins from CoinGecko...")
+    raw_path = Path(args.data_dir) / "marketcap-caps-raw.json"
+    print(f"Fetching top {args.pages * 250} coins from CoinGecko...", flush=True)
     coins = fetch_top_coins(args.pages)
-    print(f"{len(coins)} coins")
+    print(f"{len(coins)} coins", flush=True)
 
-    histories: dict[str, list[tuple[int, float]]] = {}
-    symbol_of = {c.coin_id: c.symbol for c in coins}
+    # Resume from whatever a previous sweep got through. The 2026-08-03 run took
+    # over two hours because CoinGecko 429s dominate the wall clock, and it held
+    # every result in memory until the last coin — so any interruption threw the
+    # whole thing away. Checkpointing makes the cost of stopping proportional.
+    histories, symbol_of = load_raw(raw_path)
+    symbol_of.update({c.coin_id: c.symbol for c in coins})
+    if histories:
+        print(f"resuming: {len(histories)} coins already cached in {raw_path}", flush=True)
+
     failed = 0
     for i, coin in enumerate(coins, 1):
+        if coin.coin_id in histories:
+            continue
         try:
             histories[coin.coin_id] = fetch_cap_history(coin.coin_id)
         except Exception as exc:  # noqa: BLE001 — one bad coin must not end the sweep
             failed += 1
-            print(f"  [{i}/{len(coins)}] {coin.symbol}: FAILED ({exc})")
+            print(f"  [{i}/{len(coins)}] {coin.symbol}: FAILED ({exc})", flush=True)
             time.sleep(args.sleep * 4)  # back off — usually a rate limit
             continue
         if i % 25 == 0:
-            print(f"  [{i}/{len(coins)}] {coin.symbol}: {len(histories[coin.coin_id])} days")
+            print(
+                f"  [{i}/{len(coins)}] {coin.symbol}: {len(histories[coin.coin_id])} days",
+                flush=True,
+            )
+        if i % 10 == 0:
+            save_raw(raw_path, histories, symbol_of)
         time.sleep(args.sleep)
+
+    save_raw(raw_path, histories, symbol_of)
 
     history = RankHistory(out)
     history.by_day = build_rank_history(histories, symbol_of=symbol_of)
