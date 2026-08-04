@@ -194,14 +194,27 @@ class PitResult:
     periods: list[PeriodResult] = field(default_factory=list)
     initial_cash: float = 0.0
     notes: list[str] = field(default_factory=list)
+    chained: bool = True
 
     @property
     def final_equity(self) -> float:
+        self._require_chained()
         return self.periods[-1].end_equity if self.periods else self.initial_cash
 
     @property
     def total_return_pct(self) -> float:
+        self._require_chained()
         return (self.final_equity / self.initial_cash - 1.0) * 100.0 if self.initial_cash else 0.0
+
+    def _require_chained(self) -> None:
+        # An unchained run restarts each period at initial_cash, so compounding
+        # these numbers would quote a return the account never earned. Refusing
+        # is cheaper than a plausible wrong figure reaching a report.
+        if not self.chained:
+            raise ValueError(
+                "this run did not chain equity across periods (chain_equity=False); "
+                "use per-period returns, not a compounded total"
+            )
 
     @property
     def mean_period_return_pct(self) -> float:
@@ -222,9 +235,13 @@ class PitResult:
         return out
 
     def summary(self) -> str:
-        lines = [
-            f"Point-in-time: {len(self.periods)} periods | "
+        head = (
             f"total {self.total_return_pct:+.2f}% | "
+            if self.chained
+            else "unchained (per-period only) | "
+        )
+        lines = [
+            f"Point-in-time: {len(self.periods)} periods | {head}"
             f"mean/period {self.mean_period_return_pct:+.2f}% "
             f"(sd {self.stdev_period_return_pct:.2f})",
         ]
@@ -266,6 +283,7 @@ def run_point_in_time(
     slippage_bps: float = 5.0,
     event_blackout: bool = True,
     market_cap_ranks_at: dict[int, dict[str, int]] | None = None,
+    chain_equity: bool = True,
 ) -> PitResult:
     """Re-screen and replay over consecutive equal-length periods.
 
@@ -279,10 +297,16 @@ def run_point_in_time(
     ``market_cap_ranks_at`` maps a period's ``as_of_ms`` to the ranks known at
     that date. Omit it and the rank criterion is skipped entirely, which
     ``PitResult.notes`` will say (D-43b).
+
+    ``chain_equity=False`` restarts every period from ``initial_cash``. That is
+    not how the account behaves and must never be used to quote a return; it
+    exists so a parameter sweep can compare two settings period by period
+    without the comparison being dominated by whichever one happened to enter
+    the period richer.
     """
     step = INTERVAL_MS[interval]
     warmup_ms = max(entry_n, exit_n) * step * 2  # generous lead-in so channels are primed
-    result = PitResult(initial_cash=initial_cash)
+    result = PitResult(initial_cash=initial_cash, chained=chain_equity)
 
     equity = initial_cash
     for i in range(periods):
@@ -336,7 +360,7 @@ def run_point_in_time(
                 rank_criterion_applied=ranks is not None,
             )
         )
-        equity = portfolio.final_equity
+        equity = portfolio.final_equity if chain_equity else initial_cash
 
     # D-43(b): the divergence from production is never allowed to go silent.
     applied = sum(1 for p in result.periods if p.rank_criterion_applied)

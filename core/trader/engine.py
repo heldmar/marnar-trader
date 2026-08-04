@@ -145,25 +145,43 @@ class PaperEngine:
 
         self.strategies = {s: make_strategy() for s in self.symbols}
         self._started = False
+        # Symbols whose warmup failed: primed with nothing, so parked out of
+        # trading and retried every poll until they come back.
+        self._unwarmed: set[str] = set()
 
     # -- lifecycle ---------------------------------------------------------------
 
     def start(self) -> None:
-        """Rebuild indicator state from history; act on nothing stale."""
+        """Rebuild indicator state from history; act on nothing stale.
+
+        Warmup is per-symbol isolated: one pair whose klines endpoint errors
+        (delisted mid-session, a 451, a malformed row) used to abort the whole
+        warmup, so the engine never started and *nothing* traded. Now the
+        healthy pairs start and the casualty is parked in ``_unwarmed`` for the
+        poll loop to retry. Only a total failure is fatal, since that is a real
+        outage rather than one bad symbol.
+        """
         latest_closed = self._latest_closed_open_time()
+        failures: dict[str, Exception] = {}
         for symbol in self.symbols:
-            last_done = self.journal.get_state(LAST_CANDLE_KEY.format(symbol=symbol))
-            candles = self._fetch_closed(
-                symbol, latest_closed - (self._warmup_candles - 1) * self.step
+            try:
+                self._warm_symbol(symbol, latest_closed)
+            except Exception as exc:  # noqa: BLE001 — isolated, retried each poll
+                failures[symbol] = exc
+                log.exception("engine warmup failed for %s — will retry each poll", symbol)
+        if failures and len(failures) == len(self.symbols):
+            raise RuntimeError(
+                f"warmup failed for all {len(failures)} symbols: {failures[self.symbols[0]]}"
             )
-            qty = self._position_qty(symbol)
-            for c in candles:
-                self.strategies[symbol].on_candle(c, _Muted(qty))  # type: ignore[arg-type]
-            if candles:
-                self.store.append(symbol, self.interval, candles)
-            self.journal.set_state(
-                LAST_CANDLE_KEY.format(symbol=symbol),
-                max(latest_closed, last_done or 0),
+        self._unwarmed = set(failures)
+        if failures:
+            self.journal.record_event(
+                "WARMUP_PARTIAL", "engine",
+                {"failed": sorted(failures), "ok": len(self.symbols) - len(failures)},
+            )
+            self.alerts.send(
+                f"⚠️ engine started without {len(failures)} pair(s): "
+                f"{', '.join(sorted(failures))} — retrying, they will not trade meanwhile"
             )
         self._started = True
         # First-ever start stamps the paper clock (Q13: 3 consecutive weeks) and
@@ -189,6 +207,23 @@ class PaperEngine:
         log.info(
             "engine warmed up: %d symbols, interval %s, next actionable close at %d",
             len(self.symbols), self.interval, latest_closed + self.step,
+        )
+
+    def _warm_symbol(self, symbol: str, latest_closed: int) -> None:
+        last_done = self.journal.get_state(LAST_CANDLE_KEY.format(symbol=symbol))
+        candles = self._fetch_closed(
+            symbol, latest_closed - (self._warmup_candles - 1) * self.step
+        )
+        qty = self._position_qty(symbol)
+        for c in candles:
+            self.strategies[symbol].on_candle(c, _Muted(qty))  # type: ignore[arg-type]
+        if candles:
+            self.store.append(symbol, self.interval, candles)
+        # Marking the symbol caught up is what makes warmup non-acting: without
+        # it the next poll would replay this history through a live context.
+        self.journal.set_state(
+            LAST_CANDLE_KEY.format(symbol=symbol),
+            max(latest_closed, last_done or 0),
         )
 
     async def run(self) -> None:
@@ -230,8 +265,27 @@ class PaperEngine:
         for order in getattr(self.gateway, "poll", list)() or []:
             self._journal_paper_fills(order)
         self._check_protective_stops()
+        self._retry_unwarmed()
+
+        # Per-symbol isolation: an exception on one pair must not cost the other
+        # nineteen their candle, and must not skip the equity snapshot and
+        # circuit-breaker check below — those are the safety net, and silently
+        # not running them is the worst failure mode this loop has.
+        failures: dict[str, Exception] = {}
         for symbol in self.symbols:
-            self._process_new_candles(symbol)
+            if symbol in self._unwarmed:
+                continue  # unprimed channel — trading it would act on nothing
+            try:
+                self._process_new_candles(symbol)
+            except Exception as exc:  # noqa: BLE001 — isolated per symbol
+                failures[symbol] = exc
+                log.exception("poll failed for %s (other symbols continue)", symbol)
+        if failures:
+            self.journal.record_event(
+                "POLL_SYMBOL_FAILURES", "engine",
+                {"symbols": {s: str(e) for s, e in sorted(failures.items())}},
+            )
+
         equity = Decimal(str(self.gateway.equity_usdt()))
         self._snapshot_equity(equity)
         result = halt_and_apply(self.risk, self.orders, equity)
@@ -243,6 +297,23 @@ class PaperEngine:
                 f"orders, closed {len(result['closed_positions'])} positions. "
                 "Manual /api/resume required."
             )
+
+    def _retry_unwarmed(self) -> None:
+        """Give symbols that missed warmup another chance, once per poll. A pair
+        that 451s for an hour rejoins by itself; one that is genuinely gone
+        simply keeps failing and keeps not trading."""
+        if not self._unwarmed:
+            return
+        latest_closed = self._latest_closed_open_time()
+        for symbol in sorted(self._unwarmed):
+            try:
+                self._warm_symbol(symbol, latest_closed)
+            except Exception as exc:  # noqa: BLE001 — stays parked, retried next poll
+                log.warning("warmup retry still failing for %s: %s", symbol, exc)
+                continue
+            self._unwarmed.discard(symbol)
+            self.journal.record_event("WARMUP_RECOVERED", symbol, {})
+            log.info("engine warmup recovered for %s — it can trade again", symbol)
 
     SNAPSHOT_EVERY_MS = 15 * 60 * 1000  # UI equity curve granularity
 

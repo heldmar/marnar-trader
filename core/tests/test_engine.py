@@ -172,3 +172,104 @@ def test_engine_no_warning_while_blackout_calendar_has_future_events(world, capl
             now_ms=lambda: within_calendar,
         )
     assert not any("no future entries" in r.message for r in caplog.records)
+
+
+# -- per-symbol isolation ---------------------------------------------------------
+
+
+class BrokenForSymbol(FakeMarket):
+    """A market where exactly one pair's klines endpoint is down — the ordinary
+    case of a delist, a regional 451, or a transient 5xx."""
+
+    def __init__(self, data, broken: str):
+        super().__init__(data)
+        self.broken = broken
+        self.calls = 0
+
+    def klines(self, symbol, interval, *, start_ms, limit=1000):
+        self.calls += 1
+        if symbol == self.broken:
+            raise RuntimeError(f"{symbol} unavailable")
+        return super().klines(symbol, interval, start_ms=start_ms, limit=limit)
+
+
+@pytest.fixture
+def two_symbol_world(world, tmp_path):
+    """The same breakout on BTCUSDT, plus an ETHUSDT that is broken."""
+    data = dict(world["market"].data)
+    data["ETHUSDT"] = list(data["BTCUSDT"])
+    world["prices"].prices["ETHUSDT"] = "110"
+    market = BrokenForSymbol(data, broken="ETHUSDT")
+
+    def engine(**kw):
+        eng = world["engine"](**kw)
+        eng.market = market
+        eng.symbols = ["BTCUSDT", "ETHUSDT"]
+        eng.strategies["ETHUSDT"] = eng.strategies["BTCUSDT"].__class__(
+            entry_n=3, exit_n=3, stop_loss_pct=5.0
+        )
+        return eng
+
+    return {**world, "engine2": engine, "market2": market}
+
+
+def test_one_broken_symbol_does_not_stop_the_engine_starting(two_symbol_world):
+    """Before this, a single failing pair aborted warmup, so the engine never
+    started and *nothing* traded — a one-symbol outage became a total one."""
+    eng = two_symbol_world["engine2"]()
+    eng.start()
+    assert eng._started
+    assert eng._unwarmed == {"ETHUSDT"}
+
+
+def test_the_healthy_symbol_still_trades_when_another_is_broken(two_symbol_world):
+    eng = two_symbol_world["engine2"]()
+    eng.start()
+    two_symbol_world["now"]["ms"] = T0 + 11 * H
+    eng.poll_once()
+    symbols = [p["symbol"] for p in two_symbol_world["journal"].positions()]
+    assert symbols == ["BTCUSDT"]
+
+
+def test_an_unwarmed_symbol_is_never_traded(two_symbol_world):
+    """Its Donchian channel was primed with nothing, so any signal it produced
+    would be an artefact. It must sit out until warmup succeeds."""
+    eng = two_symbol_world["engine2"]()
+    eng.start()
+    two_symbol_world["now"]["ms"] = T0 + 11 * H
+    eng.poll_once()
+    assert "ETHUSDT" not in {p["symbol"] for p in two_symbol_world["journal"].positions()}
+    assert "ETHUSDT" in eng._unwarmed
+
+
+def test_a_recovered_symbol_rejoins_on_a_later_poll(two_symbol_world):
+    eng = two_symbol_world["engine2"]()
+    eng.start()
+    assert eng._unwarmed == {"ETHUSDT"}
+    two_symbol_world["market2"].broken = None  # the outage clears
+    two_symbol_world["now"]["ms"] = T0 + 11 * H
+    eng.poll_once()
+    assert eng._unwarmed == set()
+    assert two_symbol_world["journal"].events_of_kind(["WARMUP_RECOVERED"])
+
+
+def test_the_circuit_breaker_still_runs_when_a_symbol_fails(two_symbol_world):
+    """The worst failure mode of the old loop: one raising symbol skipped the
+    equity snapshot and the halt check for the whole cycle."""
+    eng = two_symbol_world["engine2"]()
+    eng.start()
+    eng._unwarmed = set()  # force ETHUSDT to be polled, and to raise
+    two_symbol_world["now"]["ms"] = T0 + 11 * H
+    eng.poll_once()  # must not raise
+    assert two_symbol_world["journal"].get_state("engine:last_equity_snapshot")
+    assert two_symbol_world["journal"].events_of_kind(["POLL_SYMBOL_FAILURES"])
+
+
+def test_total_warmup_failure_is_still_fatal(world, tmp_path):
+    """One bad symbol is isolated; every symbol failing is a real outage and
+    must keep surfacing as a warmup failure the run loop retries and alerts."""
+    eng = world["engine"]()
+    eng.market = BrokenForSymbol(dict(world["market"].data), broken="BTCUSDT")
+    with pytest.raises(RuntimeError, match="all 1 symbols"):
+        eng.start()
+    assert not eng._started
