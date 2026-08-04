@@ -36,6 +36,24 @@ LEVERAGED_SUFFIXES = ("UP", "DOWN", "BULL", "BEAR")
 COINGECKO_MARKETS_URL = "https://api.coingecko.com/api/v3/coins/markets"
 
 
+def excluded_base_reason(base: str, config: ScreenerConfig) -> str | None:
+    """Why *base* can never be part of our universe, or None if it may pass.
+
+    Shared with the point-in-time screen (``trader.pit``) so the historical
+    harness and production apply the identical asset-class exclusions — the
+    2026-07-30 scratchpad screen omitted ``exclude_bases`` and leaked EUR into
+    its picks, which is exactly the divergence this function exists to prevent.
+    """
+    # Static list + pattern: any base with "USD" in its name is a dollar-pegged
+    # stable (USDC, FDUSD, USD1, RLUSD, ...) — new stables appear faster than a
+    # hardcoded list can follow.
+    if base in config.exclude_bases or "USD" in base:
+        return "stablecoin or fiat base asset"
+    if any(base.endswith(sfx) for sfx in LEVERAGED_SUFFIXES):
+        return "leveraged token (UP/DOWN/BULL/BEAR)"
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class PairVerdict:
     symbol: str
@@ -166,14 +184,9 @@ class Screener:
             if info["status"] != "TRADING" or not info.get("isSpotTradingAllowed", True):
                 exclude("not in TRADING status / spot disabled")
                 continue
-            # Static list + pattern: any base with "USD" in its name is a
-            # dollar-pegged stable (USDC, FDUSD, USD1, RLUSD, ...) — new stables
-            # appear faster than a hardcoded list can follow.
-            if base in cfg.exclude_bases or "USD" in base:
-                exclude("stablecoin or fiat base asset")
-                continue
-            if any(base.endswith(sfx) for sfx in LEVERAGED_SUFFIXES):
-                exclude("leveraged token (UP/DOWN/BULL/BEAR)")
+            base_reason = excluded_base_reason(base, cfg)
+            if base_reason is not None:
+                exclude(base_reason)
                 continue
             ticker = self.tickers.get(symbol)
             if ticker is None:
