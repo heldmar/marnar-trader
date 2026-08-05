@@ -624,6 +624,12 @@ def main() -> int:
     parser.add_argument("--stop", type=float, default=3.0, help="stop %%; 0 disables the stop")
     parser.add_argument("--capital", type=float, default=150.0)
     parser.add_argument(
+        "--no-delisted",
+        action="store_true",
+        help="reproduce the old survivorship-biased universe (TRADING only). "
+        "For differencing the bias only — never for quoting a result.",
+    )
+    parser.add_argument(
         "--ranks",
         default=None,
         help="path to marketcap-ranks.json (trader.marketcap); omit to skip the criterion",
@@ -638,8 +644,11 @@ def main() -> int:
     from trader.marketdata import BinancePublicData
 
     public = BinancePublicData()
-    symbols = universe_symbols(public.exchange_info(), config.screener)
-    print(f"{len(symbols)} USDT spot pairs in today's exchangeInfo")
+    symbols = universe_symbols(
+        public.exchange_info(), config.screener, include_delisted=not args.no_delisted
+    )
+    label = "TRADING only — SURVIVORSHIP-BIASED" if args.no_delisted else "incl. delisted"
+    print(f"{len(symbols)} USDT spot pairs in today's exchangeInfo ({label})")
 
     if args.fetch:
         downloader = KlineDownloader(public, store)
