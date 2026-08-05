@@ -17,7 +17,10 @@ from trader.config import ScreenerConfig
 from trader.marketdata import Candle
 from trader.pit import (
     DAY_MS,
+    PeriodResult,
+    PitResult,
     base_asset,
+    buy_and_hold_return_pct,
     run_point_in_time,
     screen_at,
     universe_symbols,
@@ -473,3 +476,136 @@ def test_sizing_tracks_equity_so_the_cap_cannot_deadlock():
     assert sum(p.buys for p in live_sizing.periods) > sum(p.buys for p in fixed_dollar.periods)
     # Trading must not stop after the opening period.
     assert all(p.buys > 0 for p in live_sizing.periods)
+
+
+# -- D-46(a) benchmarks ----------------------------------------------------------
+
+
+def _closes(closes: list[float], *, start_ms: int = 0) -> list[Candle]:
+    """Bars with exactly the given closes, priced so the screen accepts them."""
+    return [_bar(start_ms // DAY_MS + i, c, 9_000_000.0) for i, c in enumerate(closes)]
+
+
+def test_buy_and_hold_is_equal_weight_and_scaled_to_exposure():
+    """The hurdle is held at the same exposure our caps allow, not 100% invested
+    — otherwise the strategy would be penalised for a risk limit the investor
+    chose on purpose."""
+    series = {
+        "AUSDT": _closes([100.0, 150.0, 200.0]),  # +100%
+        "BUSDT": _closes([100.0, 90.0, 50.0]),  # -50%
+    }
+    # Equal weight over the two legs: (+100% + -50%) / 2 = +25%, at 45% exposure.
+    got = buy_and_hold_return_pct(
+        series, ["AUSDT", "BUSDT"], 0, 3 * DAY_MS, exposure_pct=45.0
+    )
+    assert got == pytest.approx(25.0 * 0.45)
+
+
+def test_buy_and_hold_prices_only_bars_inside_the_window():
+    """A benchmark that reads bars outside its period is lookahead by another
+    name — the exact defect this module exists to prevent."""
+    series = {"AUSDT": _closes([100.0, 200.0, 400.0, 800.0])}
+    inside = buy_and_hold_return_pct(series, ["AUSDT"], DAY_MS, 3 * DAY_MS, exposure_pct=100.0)
+    # Bars 1 and 2 only: 200 -> 400.
+    assert inside == pytest.approx(100.0)
+
+
+def test_unpriceable_benchmark_is_none_not_zero():
+    """Silently reporting 0% for a benchmark with no data would understate the
+    hurdle and hand the strategy a win it did not earn."""
+    series = {"AUSDT": _closes([100.0, 110.0])}
+    assert buy_and_hold_return_pct(series, ["ZZZUSDT"], 0, 2 * DAY_MS, exposure_pct=45.0) is None
+
+
+def test_run_records_both_benchmarks_for_every_period():
+    series = {
+        f"{c}USDT": make_trending_series(quote_volume=9_000_000.0 - i * 1000)
+        for i, c in enumerate("ABCDE")
+    }
+    series["BTCUSDT"] = make_trending_series(quote_volume=9_500_000.0)
+    result = run_point_in_time(
+        series, start_ms=100 * DAY_MS, periods=3, config=CFG, initial_cash=150.0
+    )
+    assert result.benchmark_exposure_pct == pytest.approx(45.0)  # 5 slots x 9%
+    for p in result.periods:
+        assert p.benchmark_universe_pct is not None
+        assert p.benchmark_btc_pct is not None
+    assert result.benchmark_universe_total_pct is not None
+    assert result.benchmark_btc_total_pct is not None
+    assert isinstance(result.beats_benchmarks, bool)
+
+
+def test_missing_btc_history_leaves_the_verdict_undecided():
+    """No BTC bars means no BTC hurdle, and a hurdle we cannot price must read
+    as 'unknown', never as 'cleared'."""
+    series = {
+        f"{c}USDT": make_trending_series(quote_volume=9_000_000.0 - i * 1000)
+        for i, c in enumerate("ABCDE")
+    }
+    result = run_point_in_time(
+        series, start_ms=100 * DAY_MS, periods=2, config=CFG, initial_cash=150.0
+    )
+    assert all(p.benchmark_btc_pct is None for p in result.periods)
+    assert result.benchmark_btc_total_pct is None
+    assert result.beats_benchmarks is None
+
+
+def _period(ret_pct: float, uni: float | None, btc: float | None) -> PeriodResult:
+    return PeriodResult(
+        index=0,
+        start_ms=0,
+        end_ms=DAY_MS,
+        symbols=["AUSDT"],
+        start_equity=100.0,
+        end_equity=100.0 * (1 + ret_pct / 100.0),
+        buys=1,
+        sells=1,
+        fees=0.0,
+        benchmark_universe_pct=uni,
+        benchmark_btc_pct=btc,
+    )
+
+
+@pytest.mark.parametrize(
+    ("uni", "btc", "expected"),
+    [
+        (5.0, 5.0, True),  # beats both
+        (5.0, 20.0, False),  # loses to BTC
+        (20.0, 5.0, False),  # loses to its own universe
+        (20.0, 20.0, False),  # loses to both
+        (5.0, None, None),  # one hurdle unpriceable
+    ],
+)
+def test_both_hurdles_must_be_cleared(uni, btc, expected):
+    """D-46(a) is an AND, not an OR. Beating BTC while losing to a coin-flip
+    hold of the very coins the screen picked is not an edge."""
+    period = _period(10.0, uni, btc)
+    assert period.beats_benchmarks is expected
+
+    result = PitResult(initial_cash=100.0, chained=True)
+    result.periods.append(period)
+    assert result.beats_benchmarks is expected
+
+
+def test_benchmarks_compound_across_periods():
+    """Chaining, not averaging: a hurdle quoted as a mean would be a different
+    number from the equity curve it is being compared against."""
+    result = PitResult(initial_cash=100.0, chained=True)
+    result.periods.append(_period(0.0, 10.0, 10.0))
+    result.periods.append(_period(0.0, 10.0, -10.0))
+    assert result.benchmark_universe_total_pct == pytest.approx(21.0)  # 1.1 * 1.1
+    assert result.benchmark_btc_total_pct == pytest.approx(-1.0)  # 1.1 * 0.9
+
+
+def test_summary_prints_the_verdict():
+    series = {
+        f"{c}USDT": make_trending_series(quote_volume=9_000_000.0 - i * 1000)
+        for i, c in enumerate("ABCDE")
+    }
+    series["BTCUSDT"] = make_trending_series(quote_volume=9_500_000.0)
+    result = run_point_in_time(
+        series, start_ms=100 * DAY_MS, periods=2, config=CFG, initial_cash=150.0
+    )
+    text = result.summary()
+    assert "BENCHMARKS (D-46a" in text
+    assert "VERDICT:" in text

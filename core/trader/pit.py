@@ -192,10 +192,25 @@ class PeriodResult:
     sells: int
     fees: float
     rank_criterion_applied: bool = False
+    #: D-46(a) hurdles for this period, in percent, at the same exposure the
+    #: risk caps allow. ``None`` when the benchmark could not be priced (no
+    #: bars for BTC, or none of the screened symbols priced in the window).
+    benchmark_universe_pct: float | None = None
+    benchmark_btc_pct: float | None = None
 
     @property
     def return_pct(self) -> float:
         return (self.end_equity / self.start_equity - 1.0) * 100.0
+
+    @property
+    def beats_benchmarks(self) -> bool | None:
+        """D-46(a): the strategy must beat BOTH hurdles, not either."""
+        if self.benchmark_universe_pct is None or self.benchmark_btc_pct is None:
+            return None
+        return (
+            self.return_pct > self.benchmark_universe_pct
+            and self.return_pct > self.benchmark_btc_pct
+        )
 
 
 @dataclass(slots=True)
@@ -234,6 +249,46 @@ class PitResult:
         rs = [p.return_pct for p in self.periods]
         return statistics.stdev(rs) if len(rs) > 1 else 0.0
 
+    #: Exposure the benchmarks are held at, so they are compared like-for-like
+    #: with a book that can never be more than max_open_positions * spend_pct
+    #: invested. Set by ``run_point_in_time``; the rest is cash earning nothing.
+    benchmark_exposure_pct: float = 45.0
+
+    def _compound(self, attr: str) -> float | None:
+        """Chain per-period benchmark returns the way equity chains. Returns
+        None if any period could not be priced — a benchmark with a hole in it
+        is not a benchmark, and quoting it would understate the hurdle."""
+        self._require_chained()
+        factor = 1.0
+        for p in self.periods:
+            value = getattr(p, attr)
+            if value is None:
+                return None
+            factor *= 1.0 + value / 100.0
+        return (factor - 1.0) * 100.0
+
+    @property
+    def benchmark_universe_total_pct(self) -> float | None:
+        """Equal-weight buy-and-hold of whatever the screen picked each period,
+        rebalanced at each screen. The 'did the trading logic beat just holding
+        what it chose' hurdle."""
+        return self._compound("benchmark_universe_pct")
+
+    @property
+    def benchmark_btc_total_pct(self) -> float | None:
+        """Buy-and-hold BTC at the same exposure — the 'did any of this beat the
+        obvious passive alternative' hurdle."""
+        return self._compound("benchmark_btc_pct")
+
+    @property
+    def beats_benchmarks(self) -> bool | None:
+        """D-46(a): real capital requires clearing BOTH hurdles."""
+        uni = self.benchmark_universe_total_pct
+        btc = self.benchmark_btc_total_pct
+        if uni is None or btc is None:
+            return None
+        return self.total_return_pct > uni and self.total_return_pct > btc
+
     @property
     def turnover(self) -> list[int]:
         """How many symbols changed between consecutive screens — the quantity
@@ -255,14 +310,92 @@ class PitResult:
             f"(sd {self.stdev_period_return_pct:.2f})",
         ]
         for p in self.periods:
+            bench = ""
+            if p.benchmark_universe_pct is not None and p.benchmark_btc_pct is not None:
+                mark = {True: "WIN ", False: "lose", None: "  ? "}[p.beats_benchmarks]
+                bench = (
+                    f" | univ {p.benchmark_universe_pct:+7.2f}% "
+                    f"btc {p.benchmark_btc_pct:+7.2f}% {mark}"
+                )
             lines.append(
                 f"  P{p.index} {len(p.symbols):2d} symbols | {p.return_pct:+7.2f}% | "
                 f"equity {p.start_equity:8.2f} -> {p.end_equity:8.2f} | "
-                f"{p.buys}B/{p.sells}S | fees {p.fees:.2f}"
+                f"{p.buys}B/{p.sells}S | fees {p.fees:.2f}{bench}"
             )
+        # D-46(a): the hurdle is reported on every run, so no future report can
+        # quote a return without saying what the alternatives did.
+        if self.chained:
+            uni = self.benchmark_universe_total_pct
+            btc = self.benchmark_btc_total_pct
+            if uni is not None and btc is not None:
+                lines.append(
+                    f"  BENCHMARKS (D-46a, compounded, {self.benchmark_exposure_pct:.0f}% "
+                    f"exposure): universe {uni:+.2f}% | BTC {btc:+.2f}% | "
+                    f"strategy {self.total_return_pct:+.2f}%"
+                )
+                lines.append(
+                    "  VERDICT: "
+                    + (
+                        "clears both hurdles"
+                        if self.beats_benchmarks
+                        else "FAILS the D-46(a) hurdle — does not beat both"
+                    )
+                )
         for note in self.notes:
             lines.append(f"  note: {note}")
         return "\n".join(lines)
+
+
+def _window_closes(
+    bars: list[Candle], start_ms: int, end_ms: int
+) -> tuple[float, float] | None:
+    """First and last close inside ``[start_ms, end_ms)``, or None if the symbol
+    has no bars there. A pair that stops trading mid-period marks out at its last
+    available close, which flatters the benchmark — a delisted coin rarely
+    liquidates at its last print. The hurdle is therefore, if anything, easier
+    than reality, which is the safe direction for a hurdle to err."""
+    first = last = None
+    for c in bars:
+        if c.open_time < start_ms:
+            continue
+        if c.open_time >= end_ms:
+            break
+        if first is None:
+            first = c.close
+        last = c.close
+    if first is None or last is None:
+        return None
+    return first, last
+
+
+def buy_and_hold_return_pct(
+    series: dict[str, list[Candle]],
+    symbols: list[str],
+    start_ms: int,
+    end_ms: int,
+    *,
+    exposure_pct: float,
+) -> float | None:
+    """D-46(a) hurdle: equal-weight buy-and-hold of ``symbols`` over the period,
+    with only ``exposure_pct`` of capital invested and the rest in idle cash.
+
+    The exposure haircut is what makes the comparison fair: our book can never
+    hold more than ``max_open_positions * spend_pct`` of equity in coins, so
+    measuring it against a 100%-invested index would penalise it for a cap the
+    investor chose deliberately. Returns None when nothing could be priced.
+    """
+    legs = []
+    for s in symbols:
+        closes = _window_closes(series.get(s, []), start_ms, end_ms)
+        if closes is None:
+            continue
+        first, last = closes
+        if first <= 0:
+            continue
+        legs.append(last / first - 1.0)
+    if not legs:
+        return None
+    return (sum(legs) / len(legs)) * exposure_pct
 
 
 def run_point_in_time(
@@ -317,6 +450,19 @@ def run_point_in_time(
     warmup_ms = max(entry_n, exit_n) * step * 2  # generous lead-in so channels are primed
     result = PitResult(initial_cash=initial_cash, chained=chain_equity)
 
+    # The book can hold at most this fraction in coins; the benchmarks are held
+    # at the same fraction so the hurdle measures skill, not leverage (D-46a).
+    # ``spend_pct=None`` means the fixed-dollar sizing path, where the invested
+    # fraction is set by the dollar spend against starting equity instead.
+    per_slot_pct = (
+        spend_pct
+        if spend_pct is not None
+        else (spend_usdt / initial_cash * 100.0 if initial_cash > 0 else 0.0)
+    )
+    exposure_pct = min(100.0, max_open_positions * min(per_slot_pct, max_position_pct))
+    result.benchmark_exposure_pct = exposure_pct
+    btc_symbol = f"BTC{config.quote_asset}"
+
     equity = initial_cash
     for i in range(periods):
         period_start = start_ms + i * period_days * DAY_MS
@@ -367,6 +513,20 @@ def run_point_in_time(
                 sells=portfolio.sells,
                 fees=portfolio.fees,
                 rank_criterion_applied=ranks is not None,
+                benchmark_universe_pct=buy_and_hold_return_pct(
+                    series,
+                    screen.symbols,
+                    period_start,
+                    period_end,
+                    exposure_pct=exposure_pct,
+                ),
+                benchmark_btc_pct=buy_and_hold_return_pct(
+                    series,
+                    [btc_symbol],
+                    period_start,
+                    period_end,
+                    exposure_pct=exposure_pct,
+                ),
             )
         )
         equity = portfolio.final_equity if chain_equity else initial_cash
