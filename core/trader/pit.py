@@ -14,11 +14,20 @@ period**, then replays the strategy on whatever that screen selected. The
 universe becomes an output of the method rather than an input chosen by the
 analyst.
 
+**Delisted pairs are now included (2026-08-05).** They used to be the largest
+remaining defect: the universe came from today's ``exchangeInfo`` filtered to
+``TRADING``, so every pair that died since 2024 was missing — and dead pairs are
+disproportionately losers, so every return figure was biased upward. The fix
+turned out to need no archival data source at all: Binance keeps delisted pairs
+in ``exchangeInfo`` under status ``BREAK`` and still serves their klines. See
+``universe_symbols`` for the measured size of what was being dropped.
+
 What it does NOT fix, and callers must keep stating (D-43b):
 
-- **Delisted pairs are absent.** The candle source is today's ``exchangeInfo``,
-  so pairs Binance removed never enter the sample. Residual survivorship stays,
-  biased optimistic.
+- **Pairs delisted _before_ the window are still unreachable.** The klines
+  endpoint returns nothing for a pair that stopped trading before the requested
+  start, so 80 of the 193 delisted pairs contribute no bars. They cannot bias a
+  window they never overlap, but a longer backtest would re-expose the gap.
 - **The market-cap criterion is only applied if a rank provider is supplied.**
   Production screens on top-N market cap (``ScreenerConfig.max_market_cap_rank``);
   no free source serves *historical* ranks, and the investor declined a paid
@@ -379,15 +388,42 @@ def run_point_in_time(
 # -- universe fetch + CLI ---------------------------------------------------------
 
 
-def universe_symbols(exchange_info: dict, config: ScreenerConfig) -> list[str]:
-    """Every spot pair worth downloading: right quote asset, currently trading,
-    and not excluded by asset class. This is where survivorship enters — the
-    endpoint only lists pairs that still exist today."""
+#: Pair statuses that belong in a *backtest* universe. ``BREAK`` is Binance's
+#: state for a delisted/halted pair: it stays in ``exchangeInfo`` and the klines
+#: endpoint still serves its history, so including it is what removes most of
+#: the survivorship bias. Live trading must never see these — ``screener.py``
+#: keeps its own ``TRADING``-only check and is deliberately not widened here.
+BACKTEST_STATUSES = frozenset({"TRADING", "BREAK"})
+
+
+def universe_symbols(
+    exchange_info: dict,
+    config: ScreenerConfig,
+    *,
+    include_delisted: bool = True,
+) -> list[str]:
+    """Every spot pair worth downloading: right quote asset, not excluded by
+    asset class, and — by default — *including pairs that have since died*.
+
+    Survivorship used to enter right here. Restricting to ``TRADING`` dropped
+    every pair delisted since 2024, and those are disproportionately losers, so
+    every return figure the harness produced was biased upward. Measured
+    2026-08-05: of 723 USDT pairs that ever traded, 489 are ``TRADING`` and 193
+    are genuine delisted spot pairs in ``BREAK`` — **113 of which have real
+    daily history inside the 8-quarter backtest window** (median 338 bars).
+    Only one genuine pair (``NBTUSDT``) has left ``exchangeInfo`` altogether;
+    the other 40 absentees are leveraged UP/DOWN tokens we exclude anyway.
+
+    Pass ``include_delisted=False`` to reproduce the old survivorship-biased
+    universe — kept only so the bias can be *measured* by differencing the two
+    runs, never as the default.
+    """
+    statuses = BACKTEST_STATUSES if include_delisted else frozenset({"TRADING"})
     out = []
     for info in exchange_info["symbols"]:
         if info["quoteAsset"] != config.quote_asset:
             continue
-        if info["status"] != "TRADING" or not info.get("isSpotTradingAllowed", True):
+        if info["status"] not in statuses or not info.get("isSpotTradingAllowed", True):
             continue
         if excluded_base_reason(info["baseAsset"], config) is not None:
             continue

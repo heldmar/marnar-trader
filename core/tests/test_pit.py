@@ -380,22 +380,73 @@ def test_stop_width_is_actually_applied():
 # -- universe_symbols ------------------------------------------------------------
 
 
-def test_universe_symbols_filters_quote_status_and_asset_class():
-    info = {
-        "symbols": [
-            {"symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT",
-             "status": "TRADING", "isSpotTradingAllowed": True},
-            {"symbol": "ETHBTC", "baseAsset": "ETH", "quoteAsset": "BTC",
-             "status": "TRADING", "isSpotTradingAllowed": True},
-            {"symbol": "DEADUSDT", "baseAsset": "DEAD", "quoteAsset": "USDT",
-             "status": "BREAK", "isSpotTradingAllowed": True},
-            {"symbol": "USDCUSDT", "baseAsset": "USDC", "quoteAsset": "USDT",
-             "status": "TRADING", "isSpotTradingAllowed": True},
-            {"symbol": "MARGINUSDT", "baseAsset": "MARGIN", "quoteAsset": "USDT",
-             "status": "TRADING", "isSpotTradingAllowed": False},
-        ]
-    }
-    assert universe_symbols(info, CFG) == ["BTCUSDT"]
+_FILTERS = [
+    {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
+    {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001"},
+    {"filterType": "NOTIONAL", "minNotional": "5"},
+]
+
+UNIVERSE_INFO = {
+    "symbols": [
+        {"symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT",
+         "status": "TRADING", "isSpotTradingAllowed": True, "filters": _FILTERS},
+        {"symbol": "ETHBTC", "baseAsset": "ETH", "quoteAsset": "BTC",
+         "status": "TRADING", "isSpotTradingAllowed": True, "filters": _FILTERS},
+        {"symbol": "DEADUSDT", "baseAsset": "DEAD", "quoteAsset": "USDT",
+         "status": "BREAK", "isSpotTradingAllowed": True, "filters": _FILTERS},
+        {"symbol": "USDCUSDT", "baseAsset": "USDC", "quoteAsset": "USDT",
+         "status": "TRADING", "isSpotTradingAllowed": True, "filters": _FILTERS},
+        {"symbol": "MARGINUSDT", "baseAsset": "MARGIN", "quoteAsset": "USDT",
+         "status": "TRADING", "isSpotTradingAllowed": False, "filters": _FILTERS},
+    ]
+}
+
+
+def test_universe_symbols_filters_quote_and_asset_class():
+    """Quote asset, spot permission and asset-class exclusions still bind. The
+    only thing that changed is that a dead pair is no longer thrown away."""
+    got = universe_symbols(UNIVERSE_INFO, CFG)
+    assert "ETHBTC" not in got, "wrong quote asset"
+    assert "USDCUSDT" not in got, "stablecoin"
+    assert "MARGINUSDT" not in got, "spot trading not allowed"
+
+
+def test_delisted_pairs_are_included_by_default():
+    """The survivorship fix. A pair Binance has stopped trading keeps status
+    BREAK in exchangeInfo and its klines stay served, so it belongs in the
+    backtest universe — dead pairs are disproportionately losers and dropping
+    them biased every return figure upward."""
+    assert universe_symbols(UNIVERSE_INFO, CFG) == ["BTCUSDT", "DEADUSDT"]
+
+
+def test_survivorship_bias_can_still_be_measured_by_excluding_them():
+    """The biased universe stays reachable so the size of the bias can be
+    differenced, but it must never be what a caller gets by default."""
+    assert universe_symbols(UNIVERSE_INFO, CFG, include_delisted=False) == ["BTCUSDT"]
+
+
+def test_live_screener_still_refuses_delisted_pairs():
+    """The widening is backtest-only. If this ever fails, live trading can pick
+    a pair that no longer trades — orders would be rejected or, worse, fill
+    against a stale book. `screener.py` must keep its own TRADING-only check."""
+    from trader.screener import Screener
+
+    huge = 10_000_000_000.0
+    tickers = [
+        {"symbol": s["symbol"], "quoteVolume": str(huge), "highPrice": "2",
+         "lowPrice": "1", "lastPrice": "1.5"}
+        for s in UNIVERSE_INFO["symbols"]
+    ]
+    report = Screener(
+        CFG,
+        exchange_info=UNIVERSE_INFO,
+        tickers_24h=tickers,
+        market_cap_ranks=None,
+    ).run()
+
+    selected = {v.symbol for v in report.qualified}
+    assert "DEADUSDT" not in selected, "a delisted pair reached the LIVE universe"
+    assert "BTCUSDT" in selected, "the live screen should still pick live pairs"
 
 
 def test_sizing_tracks_equity_so_the_cap_cannot_deadlock():
