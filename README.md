@@ -1,7 +1,25 @@
 # MarNar Trader
 
+> ### ⚠️ Project status: discontinued — no demonstrated edge
+>
+> **This system was never run with real money, and the strategy it ships did not
+> work.** In an 18-day live paper run (2026-07-30 → 2026-08-17) it returned
+> **−2.07%** with **0 winners in 4 closed trades**, and it lost to both of its
+> pre-registered benchmarks over the same window. Walk-forward backtesting told
+> the same story: 61 of 80 parameter settings lost money out-of-sample.
+>
+> The engineering below — crash-safe journaling, enforced risk floors,
+> reconciliation, paper mode, the backtesting toolkit — is real, tested, and
+> genuinely reusable. **The trading edge is not.** Treat the shipped Donchian
+> strategy as a placeholder to replace, not as something to fund.
+>
+> Full evidence: [docs/LIVE-RUN-REVIEW-2026-08-17.md](docs/LIVE-RUN-REVIEW-2026-08-17.md).
+> Development stopped 2026-08-17; this repository is published as-is for anyone
+> who wants the machinery. **Trading carries real risk of loss. Nothing here is
+> financial advice.**
+
 **An autonomous crypto trading system you actually own.** MarNar Trader runs
-24/7 on your own hardware, trades Binance Spot with a proven, rules-based
+24/7 on your own hardware, trades Binance Spot with a transparent, rules-based
 strategy, and reports back in plain language — what it did, why it did it, and
 what it cost. No cloud subscription, no black box, no custody of your keys by
 anyone but you.
@@ -28,10 +46,11 @@ Most trading bots optimize for excitement. MarNar Trader optimizes for
   Quiet days still report, so silence always means something is wrong — never
   "nothing happened".
 - **Evidence before money.** The strategy shipped here (Donchian channel
-  breakout, daily candles) was selected by walk-forward backtesting over two
-  years of data, then must survive a multi-week paper-trading gate — the full
-  production system trading simulated money on live prices — before real
-  funds are ever enabled.
+  breakout, daily candles) was tuned by walk-forward backtesting over two
+  years of data and then had to survive a multi-week paper-trading gate — the
+  full production system trading simulated money on live prices — before real
+  funds could ever be enabled. **It did not survive that gate** (see the status
+  note above); the process worked, the strategy did not.
 - **Built for non-traders.** The web UI explains itself in plain language:
   "You made money today", "why: the price broke above its 15-day high",
   "safety exit at $x". Depth is one tap away, jargon is not required.

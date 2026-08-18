@@ -49,7 +49,7 @@ React SPA served by nginx; nginx proxies `/api` to `core` (same-origin, MarNarMo
 
 ## 4. Deployment (uses MarNar Server, doesn't manage it)
 
-- Private GitHub repo `heldmar/marnar-trader` (D-15); Portainer Repository stack `marnar-trader` with read-only deploy token.
+- GitHub repo `heldmar/marnar-trader` (D-15); the reference deployment used a Portainer Repository stack with a read-only deploy token.
 - Both containers join `npm-network` (external) so NPM can route `trader.example.com` → `ui:80` with an NPM access list for auth (D-16). `core` is never exposed publicly.
 - Secrets (Binance keys, Telegram token) as Portainer **stack env vars** only.
 - Data: named volume backed by `/mnt/storage` for SQLite + Parquet.

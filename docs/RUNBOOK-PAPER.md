@@ -15,7 +15,7 @@ mode: paper
 ```
 Everything else defaults sensibly (see `PaperConfig` in `trader/config.py`):
 20-pair D-09 universe, Donchian 15/15, 3% stop @ 1d (walk-forward validated,
-`Context/reports/donchian-walkforward-2026-07-16.md`), 15 USDT per position,
+walk-forward backtesting), 15 USDT per position,
 150 USDT paper capital, 60 s poll, event-blackout on, news ingestion every 15 min.
 
 Environment variables (Portainer stack env vars in production — never in files):

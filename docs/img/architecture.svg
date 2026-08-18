@@ -32,7 +32,7 @@
 
     <rect x="1090" y="80" width="290" height="90" rx="8" fill="#fff3e0" stroke="#e8590c" stroke-width="1.5"/>
     <text x="1235" y="103" text-anchor="middle" font-weight="700" fill="#e8590c">GitHub — heldmar/marnar-trader</text>
-    <text x="1235" y="122" text-anchor="middle" fill="#5c3a1e">private repo (D-15)</text>
+    <text x="1235" y="122" text-anchor="middle" fill="#5c3a1e">source repo (D-15)</text>
     <text x="1235" y="138" text-anchor="middle" fill="#5c3a1e">Actions CI · Repository-stack source</text>
     <text x="1235" y="154" text-anchor="middle" fill="#5c3a1e">for Portainer redeploys</text>
   </g>

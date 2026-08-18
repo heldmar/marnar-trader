@@ -81,7 +81,7 @@ class BacktestConfig(BaseModel):
 
 class PaperConfig(BaseModel):
     """S5 paper-trading engine settings. Strategy parameters default to the
-    walk-forward result (Context/reports/donchian-walkforward-2026-07-16.md):
+    walk-forward result (2026-07-16 tuning run):
     Donchian 15/15 with a 3% stop on 1d candles — chosen by every fold,
     validated out-of-sample against the D-26 baseline."""
 
@@ -111,7 +111,7 @@ class PaperConfig(BaseModel):
     # x 8 quarters the 3% advantage is +2.33pp (t=3.22), holding in 8 of 8
     # leave-one-quarter-out cuts. A wide stop pays only when the universe holds
     # monster trends to ride; on an honest universe it just absorbs bigger
-    # losses. §11 of Context/reports/stop-width-remeasure-2026-07-30.md.
+    # losses. From the 2026-07-30 stop-width remeasurement, §11.
     stop_loss_pct: float = 3.0
     # D-08 was a fixed $15 (10% of the $150 pilot capital). Fixed-dollar sizing
     # deadlocks against risk.max_position_pct_per_coin the moment equity dips

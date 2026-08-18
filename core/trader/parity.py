@@ -1,6 +1,6 @@
 """Paper-vs-backtest parity report (Sprint 5 — the Q13/D-27 measuring stick).
 
-The Q13 gate (Context/Q13-PAPER-GATE-PROPOSAL.md) requires paper results to
+The Q13 paper-trading gate requires paper results to
 stay within agreed bands of a backtest run on the *same weeks* of data:
 
 - fee-adjusted return within ±2 percentage points,

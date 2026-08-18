@@ -3,8 +3,8 @@
 React + TypeScript + Vite SPA served by nginx, which also proxies `/api`
 same-origin to the core service (core is never exposed publicly).
 
-Design brief: `Context/UI-DESIGN-BRIEF.md` (UI-01..UI-15 — sage/cream, light
-only, non-financial audience, onion layering, visual-first).
+Design brief (UI-01..UI-15): sage/cream, light only, non-financial
+audience, onion layering, visual-first.
 
 ## Dev
 
